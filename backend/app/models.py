@@ -88,6 +88,8 @@ class Prescription(Base):
     os_axis: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pd: Mapped[float | None] = mapped_column(nullable=True)
     note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    reminder_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reminder_sent: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     customer: Mapped[Customer] = relationship()
 
@@ -179,13 +181,14 @@ class Order(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"))
-    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), nullable=True)
+    item_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     total: Mapped[int] = mapped_column(Integer)
     paid: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(30), default="CONFIRMED")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     customer: Mapped[Customer] = relationship()
-    product: Mapped[Product] = relationship()
+    product: Mapped[Product | None] = relationship()
 
 
 class Sale(Base):

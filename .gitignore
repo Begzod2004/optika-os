@@ -3,6 +3,7 @@ node_modules/
 __pycache__/
 .venv/
 .env
+docker-compose.prod.yml
 backend/backups/
 backend/*.db
 *.pyc

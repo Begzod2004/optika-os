@@ -22,6 +22,7 @@ class PrescriptionCreate(BaseModel):
     os_axis: int | None = Field(default=None, ge=0, le=180)
     pd: float | None = Field(default=None, ge=40, le=85)
     note: str | None = Field(default=None, max_length=500)
+    reminder_at: datetime | None = Field(default=None)
 
 
 class SupplierCreate(BaseModel):
@@ -88,7 +89,9 @@ class StockReceive(BaseModel):
 
 class OrderCreate(BaseModel):
     customer_id: int
-    product_id: int
+    product_id: int | None = None
+    item_name: str | None = Field(default=None, max_length=200)
+    total: int | None = Field(default=None, ge=0)
     paid: int = Field(default=0, ge=0)
 
 

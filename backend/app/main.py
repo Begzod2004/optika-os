@@ -127,7 +127,7 @@ def handle_telegram_update(update: dict) -> None:
                 reply = "Avval /start va telefon raqamingiz orqali profilingizni bog'lang."
             else:
                 orders = db.scalars(select(Order).options(joinedload(Order.product)).where(Order.customer_id == subscriber.customer_id, Order.status.not_in(["DELIVERED", "CANCELLED"])).order_by(Order.id.desc())).all()
-                reply = "Faol buyurtmalar topilmadi." if not orders else "Faol buyurtmalar:\n" + "\n".join(f"#{order.id} — {order.product.name}: {order.status}" for order in orders)
+                reply = "Faol buyurtmalar topilmadi." if not orders else "Faol buyurtmalar:\n" + "\n".join(f"#{order.id} — {order.item_name or (order.product.name if order.product else 'Mahsulot')}: {order.status}" for order in orders)
         elif text_value.startswith("/servis"):
             subscriber = db.scalar(select(TelegramSubscriber).where(TelegramSubscriber.chat_id == chat_id))
             if not subscriber or not subscriber.customer_id:
@@ -150,6 +150,27 @@ async def telegram_polling() -> None:
                 offset = int(update["update_id"]) + 1
                 await asyncio.to_thread(handle_telegram_update, update)
         await asyncio.sleep(1)
+
+
+def dispatch_prescription_reminders() -> None:
+    with Session(engine) as db:
+        now = datetime.utcnow()
+        due = db.scalars(select(Prescription).options(joinedload(Prescription.customer)).where(Prescription.reminder_at.is_not(None), Prescription.reminder_at <= now, Prescription.reminder_sent.is_(False))).all()
+        for presc in due:
+            message = f"Optika OS: hurmatli {presc.customer.name}, ko'z tekshiruvi/retsept yangilash vaqti keldi. Iltimos, optikaga tashrif buyuring."
+            send_telegram(db, presc.customer_id, message)
+            presc.reminder_sent = True
+        if due:
+            db.commit()
+
+
+async def reminder_scheduler() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(dispatch_prescription_reminders)
+        except Exception:
+            pass
+        await asyncio.sleep(300)
 
 
 def current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer), db: Session = Depends(get_db)) -> User:
@@ -181,7 +202,7 @@ def product_data(product: Product) -> dict:
 
 
 def prescription_data(prescription: Prescription) -> dict:
-    return {"id": prescription.id, "customer_id": prescription.customer_id, "od_sph": prescription.od_sph, "od_cyl": prescription.od_cyl, "od_axis": prescription.od_axis, "os_sph": prescription.os_sph, "os_cyl": prescription.os_cyl, "os_axis": prescription.os_axis, "pd": prescription.pd, "note": prescription.note, "created_at": prescription.created_at}
+    return {"id": prescription.id, "customer_id": prescription.customer_id, "od_sph": prescription.od_sph, "od_cyl": prescription.od_cyl, "od_axis": prescription.od_axis, "os_sph": prescription.os_sph, "os_cyl": prescription.os_cyl, "os_axis": prescription.os_axis, "pd": prescription.pd, "note": prescription.note, "reminder_at": prescription.reminder_at, "created_at": prescription.created_at}
 
 
 def supplier_data(supplier: Supplier) -> dict:
@@ -201,7 +222,7 @@ def stock_movement(db: Session, product: Product, quantity: int, movement_type: 
 
 
 def order_data(order: Order) -> dict:
-    return {"id": order.id, "customer": customer_data(order.customer), "product": product_data(order.product), "total": order.total, "paid": order.paid, "balance": order.total - order.paid, "status": order.status, "created_at": order.created_at}
+    return {"id": order.id, "customer": customer_data(order.customer), "product": product_data(order.product) if order.product else None, "item_name": order.item_name, "total": order.total, "paid": order.paid, "balance": order.total - order.paid, "status": order.status, "created_at": order.created_at}
 
 
 def repair_data(repair: RepairOrder) -> dict:
@@ -251,6 +272,7 @@ async def startup() -> None:
         seed(db)
     if settings.telegram_bot_token:
         asyncio.create_task(telegram_polling())
+        asyncio.create_task(reminder_scheduler())
 
 
 @app.get("/health")
@@ -330,7 +352,9 @@ def global_search(q: str, db: Session = Depends(get_db), _: User = Depends(curre
 def notifications(db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
     ready = list(db.scalars(select(Order).options(joinedload(Order.customer)).where(Order.status == "READY").order_by(Order.id.desc()).limit(10)))
     low = list(db.scalars(select(Product).where(Product.stock <= Product.minimum_stock).order_by(Product.stock).limit(10)))
-    result = ([{"type": "ORDER_READY", "severity": "success", "title": f"Buyurtma #{order.id} tayyor", "message": f"{order.customer.name}ga topshirish kerak", "entity_id": order.id} for order in ready] + [{"type": "LOW_STOCK", "severity": "warning", "title": f"{product.name} kam qoldi", "message": f"Qoldiq: {product.stock}, minimum: {product.minimum_stock}", "entity_id": product.id} for product in low])
+    now = datetime.utcnow()
+    due = list(db.scalars(select(Prescription).options(joinedload(Prescription.customer)).where(Prescription.reminder_at.is_not(None), Prescription.reminder_at <= now, Prescription.reminder_at >= now - timedelta(days=60)).order_by(Prescription.reminder_at.desc()).limit(10)))
+    result = ([{"type": "ORDER_READY", "severity": "success", "title": f"Buyurtma #{order.id} tayyor", "message": f"{order.customer.name}ga topshirish kerak", "entity_id": order.id} for order in ready] + [{"type": "PRESCRIPTION_REMINDER", "severity": "warning", "title": f"{presc.customer.name}ni tekshiruvga chaqiring", "message": f"Retsept eslatmasi vaqti keldi ({presc.reminder_at.strftime('%d.%m.%Y')})", "entity_id": presc.customer_id} for presc in due] + [{"type": "LOW_STOCK", "severity": "warning", "title": f"{product.name} kam qoldi", "message": f"Qoldiq: {product.stock}, minimum: {product.minimum_stock}", "entity_id": product.id} for product in low])
     return ok(result)
 
 
@@ -659,18 +683,32 @@ def list_orders(db: Session = Depends(get_db), _: User = Depends(current_user)) 
 @app.post("/api/v1/orders", status_code=status.HTTP_201_CREATED)
 def create_order(payload: OrderCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
     customer = db.get(Customer, payload.customer_id)
-    product = db.get(Product, payload.product_id)
-    if not customer or not product:
-        raise HTTPException(404, "Mijoz yoki mahsulot topilmadi")
-    if product.stock < 1:
-        raise HTTPException(409, "Omborda mahsulot qolmagan")
-    if payload.paid > product.sale_price:
+    if not customer:
+        raise HTTPException(404, "Mijoz topilmadi")
+    if payload.product_id is not None:
+        product = db.get(Product, payload.product_id)
+        if not product:
+            raise HTTPException(404, "Mahsulot topilmadi")
+        if product.stock < 1:
+            raise HTTPException(409, "Omborda mahsulot qolmagan")
+        if payload.paid > product.sale_price:
+            raise HTTPException(422, "Avans umumiy summadan katta bo'lishi mumkin emas")
+        product.stock -= 1
+        customer.debt += product.sale_price - payload.paid
+        order = Order(customer=customer, product=product, item_name=product.name, total=product.sale_price, paid=payload.paid, status="CONFIRMED")
+        db.add(order); db.flush(); stock_movement(db, product, -1, "ORDER_RESERVE", "ORDER", order.id, "Buyurtma uchun rezerv"); audit(db, _, "CREATE", "ORDER", order.id, f"Buyurtma yaratildi: {product.name}"); db.commit(); db.refresh(order)
+        db.refresh(order, attribute_names=["customer", "product"])
+        return ok(order_data(order))
+    item_name = (payload.item_name or "").strip()
+    if not item_name:
+        raise HTTPException(422, "Mahsulot nomini kiriting yoki ro'yxatdan tanlang")
+    total = payload.total or 0
+    if payload.paid > total:
         raise HTTPException(422, "Avans umumiy summadan katta bo'lishi mumkin emas")
-    product.stock -= 1
-    customer.debt += product.sale_price - payload.paid
-    order = Order(customer=customer, product=product, total=product.sale_price, paid=payload.paid, status="CONFIRMED")
-    db.add(order); db.flush(); stock_movement(db, product, -1, "ORDER_RESERVE", "ORDER", order.id, "Buyurtma uchun rezerv"); audit(db, _, "CREATE", "ORDER", order.id, f"Buyurtma yaratildi: {product.name}"); db.commit(); db.refresh(order)
-    db.refresh(order, attribute_names=["customer", "product"])
+    customer.debt += total - payload.paid
+    order = Order(customer=customer, product=None, item_name=item_name, total=total, paid=payload.paid, status="CONFIRMED")
+    db.add(order); db.flush(); audit(db, _, "CREATE", "ORDER", order.id, f"Qo'lda buyurtma yaratildi: {item_name}"); db.commit(); db.refresh(order)
+    db.refresh(order, attribute_names=["customer"])
     return ok(order_data(order))
 
 
@@ -686,7 +724,7 @@ def advance_order(order_id: int, db: Session = Depends(get_db), _: User = Depend
     audit(db, _, "ADVANCE_STATUS", "ORDER", order.id, f"Buyurtma holati: {order.status}")
     db.commit(); db.refresh(order)
     if order.status == "READY":
-        send_telegram(db, order.customer_id, f"Optika OS: buyurtmangiz #{order.id} ({order.product.name}) tayyor. Uni optikadan olib ketishingiz mumkin.")
+        send_telegram(db, order.customer_id, f"Optika OS: buyurtmangiz #{order.id} ({order.item_name or (order.product.name if order.product else 'mahsulot')}) tayyor. Uni optikadan olib ketishingiz mumkin.")
     return ok(order_data(order))
 
 
@@ -698,9 +736,10 @@ def cancel_order(order_id: int, db: Session = Depends(get_db), _: User = Depends
     if order.status in {"DELIVERED", "CANCELLED"}:
         raise HTTPException(409, "Bu buyurtmani bekor qilib bolmaydi")
     order.status = "CANCELLED"
-    order.product.stock += 1
     order.customer.debt = max(0, order.customer.debt - (order.total - order.paid))
-    stock_movement(db, order.product, 1, "ORDER_CANCEL", "ORDER", order.id, "Bekor qilingan buyurtma rezervi qaytarildi")
+    if order.product:
+        order.product.stock += 1
+        stock_movement(db, order.product, 1, "ORDER_CANCEL", "ORDER", order.id, "Bekor qilingan buyurtma rezervi qaytarildi")
     audit(db, _, "CANCEL", "ORDER", order.id, "Buyurtma bekor qilindi")
     db.commit(); db.refresh(order)
     return ok(order_data(order))
