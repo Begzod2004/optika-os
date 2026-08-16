@@ -157,7 +157,7 @@ export default function OptikaOS() {
   useEffect(() => { if (token) void loadFromApi(); else setBackendOnline(false); }, [loadFromApi, token]);
   useEffect(() => {
     if (!token) return;
-    const id = setInterval(() => { void loadFromApi(); }, 15000);
+    const id = setInterval(() => { if (!document.hidden) void loadFromApi(); }, 30000);
     const onFocus = () => { void loadFromApi(); };
     window.addEventListener("focus", onFocus);
     return () => { clearInterval(id); window.removeEventListener("focus", onFocus); };

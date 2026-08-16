@@ -1,15 +1,18 @@
 import asyncio
 import secrets
 import shutil
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
 import jwt
 import truststore
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from starlette.responses import Response
 from pwdlib import PasswordHash
 from sqlalchemy import String, func, select, text
 from sqlalchemy.orm import Session, joinedload
@@ -41,6 +44,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=500)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response: Response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    return response
+
+
+# In-memory brute-force guard for /auth/login (single-process uvicorn).
+_login_attempts: dict[str, list[float]] = {}
+LOGIN_MAX_ATTEMPTS = 8
+LOGIN_WINDOW_SECONDS = 300
+
+
+def check_login_rate(ip: str) -> None:
+    now = time.monotonic()
+    hits = [t for t in _login_attempts.get(ip, []) if now - t < LOGIN_WINDOW_SECONDS]
+    _login_attempts[ip] = hits
+    if len(hits) >= LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Juda ko'p urinish. Bir necha daqiqadan so'ng qayta urining.")
+
+
+def record_login_failure(ip: str) -> None:
+    self = _login_attempts.setdefault(ip, [])
+    self.append(time.monotonic())
 
 
 def ok(data: object) -> dict:
@@ -313,9 +347,12 @@ def create_backup(db: Session = Depends(get_db), user: User = Depends(require_ro
 
 
 @app.post("/api/v1/auth/login")
-def login(payload: LoginInput, db: Session = Depends(get_db)) -> dict:
+def login(payload: LoginInput, request: Request, db: Session = Depends(get_db)) -> dict:
+    ip = request.client.host if request.client else "unknown"
+    check_login_rate(ip)
     user = db.scalar(select(User).where(User.username == payload.username.strip().lower()))
     if not user or not password_hash.verify(payload.password, user.password_hash):
+        record_login_failure(ip)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login yoki parol notogri")
     if not user.active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Foydalanuvchi faol emas")
