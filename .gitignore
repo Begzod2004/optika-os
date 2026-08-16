@@ -7,3 +7,4 @@ docker-compose.prod.yml
 backend/backups/
 backend/*.db
 *.pyc
+graphify-out/
