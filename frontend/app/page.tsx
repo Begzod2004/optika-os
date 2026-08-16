@@ -121,6 +121,7 @@ export default function OptikaOS() {
     try {
       if (!token) return;
       const response = await fetch(`${apiUrl}/bootstrap`, { headers: { Authorization: `Bearer ${token}` } });
+      if (response.status === 401) { localStorage.removeItem("optika-token"); localStorage.removeItem("optika-user"); setToken(null); setUser(null); setNotice("Sessiya muddati tugadi. Iltimos, qaytadan kiring."); return; }
       if (!response.ok) throw new Error("API unavailable");
       const result = await response.json();
       const data = result.data;
@@ -423,6 +424,19 @@ export default function OptikaOS() {
   if (!sessionReady) return <main className="login-screen" />;
   if (!token || !user) return <LoginScreen onSubmit={signIn} notice={notice} clearNotice={() => setNotice("")}/>;
 
+  const modalTitles: Record<string, string> = {
+    customer: "Yangi mijoz", order: "Yangi buyurtma", stock: "Omborga kirim", product: "Yangi mahsulot",
+    supplier: "Yangi supplier", "cash-open": "Kassa smenasini ochish", "cash-close": "Kassa smenasini yopish",
+    expense: "Xarajat kiritish", purchase: "Supplierdan kirim", user: "Yangi xodim", branch: "Yangi filial",
+    "optical-case": "Yangi optik karta", "eye-exam": "Ko'z tekshiruvi", centration: "Centration o'lchovi",
+    "lens-config": "Linza konfiguratsiyasi", "lab-job": "Laboratoriyaga yuborish",
+    prescription: `${selectedCustomer?.name || "Mijoz"} retsepti`,
+    return: `${selectedReturn?.product.name || "Mahsulot"} qaytarish`,
+    "customer-payment": `${selectedCustomer?.name || "Mijoz"} qarzi`,
+    "supplier-payment": `${selectedSupplier?.name || "Supplier"} to'lovi`,
+  };
+  const modalTitle = modal ? (modalTitles[modal] || "Optika OS") : "";
+
   return <main className="app-shell">
     <aside className={`side ${menu ? "show" : ""}`}>
       <div className="logo"><span>O</span><div>OPTIKA<small>BUSINESS OS</small></div></div>
@@ -454,7 +468,7 @@ export default function OptikaOS() {
         {section === "Filiallar" && <><div className="heading compact"><div><p>KO'P FILIALLI BOSHQARUV</p><h1>Filiallar</h1><span>Filiallar va ulardagi xodimlar reyestri.</span></div>{user.role === "OWNER" && <button className="primary" onClick={() => setModal("branch")}>+ Filial qo'shish</button>}</div><section className="customer-grid">{branches.map(branch => <article className="customer" key={branch.id}><div className="customer-avatar">{branch.code.slice(0,2)}</div><div className="customer-info"><b>{branch.name}</b><span>{branch.address || "Manzil kiritilmagan"}</span><small>{branch.code} · {branch.members} xodim</small></div><span className={`badge ${branch.active ? "ready" : "neutral"}`}>{branch.active ? "Faol" : "Nofaol"}</span></article>)}</section></>} 
       </div>
     </section>
-    {modal && <Modal title={modal === "customer" ? "Yangi mijoz" : modal === "order" ? "Yangi buyurtma" : modal === "stock" ? "Omborga kirim" : modal === "product" ? "Yangi mahsulot" : modal === "supplier" ? "Yangi supplier" : modal === "cash-open" ? "Kassa smenasini ochish" : modal === "cash-close" ? "Kassa smenasini yopish" : modal === "return" ? `${selectedReturn?.product.name || "Mahsulot"} qaytarish` : modal === "expense" ? "Xarajat kiritish" : modal === "customer-payment" ? `${selectedCustomer?.name || "Mijoz"} qarzi` : modal === "supplier-payment" ? `${selectedSupplier?.name || "Supplier"} to'lovi` : modal === "purchase" ? "Supplierdan kirim" : `${selectedCustomer?.name || "Mijoz"} retsepti`} close={() => setModal(null)}>
+    {modal && <Modal title={modalTitle} close={() => setModal(null)}>
       {modal === "customer" && <form className="form" onSubmit={addCustomer}><label>Ism va familiya<input name="name" required placeholder="Masalan, Dilshod Karimov"/></label><label>Telefon<input name="phone" required inputMode="tel" placeholder="90 123 45 67"/></label><button className="primary">Mijozni saqlash</button></form>}
       {modal === "order" && <form className="form" onSubmit={addOrder}><label>Mijoz<select name="customer" required><option value="">Mijozni tanlang</option>{customers.map(c => <option key={c.id} value={c.name}>{c.name} — {c.phone}</option>)}</select></label><div className="order-mode-switch"><button type="button" className={manualOrder ? "" : "active"} onClick={() => setManualOrder(false)}>Ro'yxatdan</button><button type="button" className={manualOrder ? "active" : ""} onClick={() => setManualOrder(true)}>Qo'lda kiritish</button></div>{manualOrder ? <><label>Mahsulot nomi<input name="item_name" required placeholder="Masalan, Import ramka + linza"/></label><label>Umumiy narx (som)<input name="total" type="number" min="0" required placeholder="0"/></label></> : <label>Mahsulot<select name="product" required={!manualOrder}><option value="">Ramka yoki linzani tanlang</option>{products.filter(p => p.stock).map(p => <option key={p.id} value={p.id}>{p.name} — {format(p.price)}</option>)}</select></label>}<label>Avans<input name="paid" type="number" min="0" defaultValue="0"/></label><button className="primary">Buyurtma yaratish</button></form>}
       {modal === "stock" && <form className="form" onSubmit={addStock}><label>Mahsulot<select name="product">{products.map(p => <option key={p.id} value={p.id}>{p.name} (qoldiq: {p.stock})</option>)}</select></label><label>Miqdor<input name="amount" type="number" min="1" required defaultValue="1"/></label><button className="primary">Kirimni saqlash</button></form>}
