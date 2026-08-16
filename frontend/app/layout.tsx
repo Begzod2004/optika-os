@@ -6,6 +6,7 @@ export const metadata: Metadata = {
   title: "Optika OS",
   description: "Optika biznesini boshqarish tizimi",
   manifest: "/manifest.webmanifest",
+  icons: { icon: "/optika-icon.svg", shortcut: "/optika-icon.svg", apple: "/optika-icon.svg" },
   applicationName: "Optika OS",
   appleWebApp: { capable: true, title: "Optika OS", statusBarStyle: "default" },
 };
