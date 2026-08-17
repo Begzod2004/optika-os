@@ -187,3 +187,33 @@
 .tour-skip { border: 0; background: transparent; color: var(--muted); font-size: 12px; font-weight: 700; cursor: pointer; padding: 10px 4px; }
 .tour-back { border: 1px solid var(--line); background: #fff; border-radius: 9px; padding: 11px 16px; font-size: 12px; font-weight: 700; cursor: pointer; }
 .tour-next { margin-left: auto; border: 0; border-radius: 9px; padding: 12px 22px; font-size: 13px; font-weight: 700; cursor: pointer; }
+
+/* ===== PWA / mobil yaxshilanishlar ===== */
+/* Notch va home-indicator (safe-area) */
+@supports (padding: env(safe-area-inset-top)) {
+  .topbar { padding-top: env(safe-area-inset-top); height: calc(76px + env(safe-area-inset-top)); }
+  .side { padding-top: calc(28px + env(safe-area-inset-top)); }
+  .page { padding-bottom: calc(60px + env(safe-area-inset-bottom)); }
+  .checkout { margin-bottom: calc(16px + env(safe-area-inset-bottom)); }
+}
+
+@media (max-width: 760px) {
+  /* iOS: kichik shrift input'ga fokusda sahifani kattalashtiradi — 16px oldini oladi */
+  .form input, .form select, .global-search input, .modal input, .modal select { font-size: 16px; }
+  /* Uzun formalar (optik, retsept) kichik ekranga sig'sin */
+  .modal-bg { align-items: flex-start; padding: 12px; padding-top: max(16px, env(safe-area-inset-top)); }
+  .modal { max-height: 88vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  /* Barmoq uchun kattaroq bosiladigan joylar */
+  .side nav button { padding: 14px 14px; font-size: 14px; }
+  .primary, .heading button, .advance, .cancel-order, .debt-action { min-height: 40px; }
+  .tour-card { margin-bottom: max(4vh, env(safe-area-inset-bottom)); padding: 20px; }
+  .tour-card h2 { font-size: 19px; }
+  .guide-grid { grid-template-columns: 1fr; }
+  .help-body ol, .help-steps { padding-left: 16px; }
+}
+
+/* Standalone (bosh ekranga o'rnatilgan) rejimda tabiiy his */
+@media (display-mode: standalone) {
+  body { overscroll-behavior-y: contain; }
+  .pwa-install { display: none !important; }
+}
