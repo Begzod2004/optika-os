@@ -108,7 +108,47 @@ def telegram_call(method: str, payload: dict) -> dict | None:
 def send_telegram(db: Session, customer_id: int, message: str) -> None:
     chat_ids = db.scalars(select(TelegramSubscriber.chat_id).where(TelegramSubscriber.customer_id == customer_id)).all()
     for chat_id in chat_ids:
-        telegram_call("sendMessage", {"chat_id": chat_id, "text": message})
+        send_tg(chat_id, message, MAIN_MENU)
+
+
+# Mijoz uchun doimiy tugmalar (buyruq yozish shart emas).
+MAIN_MENU = {"keyboard": [[{"text": "📦 Buyurtmalarim"}, {"text": "🔧 Ta'mirlash"}], [{"text": "ℹ️ Yordam"}]], "resize_keyboard": True}
+CONTACT_KB = {"keyboard": [[{"text": "📱 Telefon raqamni ulashish", "request_contact": True}]], "resize_keyboard": True, "one_time_keyboard": True}
+
+
+def send_tg(chat_id: str, text: str, keyboard: dict | None = None) -> None:
+    payload: dict = {"chat_id": chat_id, "text": text}
+    if keyboard is not None:
+        payload["reply_markup"] = keyboard
+    telegram_call("sendMessage", payload)
+
+
+def phone_digits(value: str) -> str:
+    return "".join(ch for ch in (value or "") if ch.isdigit())
+
+
+def find_customer_by_phone(db: Session, phone: str) -> Customer | None:
+    tail = phone_digits(phone)[-9:]
+    if len(tail) < 9:
+        return None
+    for customer in db.scalars(select(Customer)).all():
+        if phone_digits(customer.phone).endswith(tail):
+            return customer
+    return None
+
+
+def link_by_phone(db: Session, chat_id: str, display_name: str | None, phone: str) -> str:
+    customer = find_customer_by_phone(db, phone)
+    if not customer:
+        return "Bu raqam optika bazasida topilmadi. Iltimos, do'konda ro'yxatdan o'tgan telefon raqamingizni ulang yoki optikaga murojaat qiling."
+    subscriber = db.scalar(select(TelegramSubscriber).where(TelegramSubscriber.chat_id == chat_id))
+    if not subscriber:
+        db.add(TelegramSubscriber(chat_id=chat_id, customer=customer, display_name=display_name))
+    else:
+        subscriber.customer = customer
+        subscriber.display_name = display_name
+    db.commit()
+    return f"Rahmat, {customer.name}! Muvaffaqiyatli ulandingiz. Pastdagi tugmalar bilan buyurtma va ta'mirlash holatini ko'rasiz."
 
 
 def link_telegram_customer(db: Session, chat_id: str, display_name: str | None, phone: str) -> str:
@@ -143,35 +183,62 @@ def link_telegram_by_token(db: Session, chat_id: str, display_name: str | None, 
     return f"Assalomu alaykum, {link.customer.name}. Optika OS botiga muvaffaqiyatli bog'landingiz. /buyurtmalar orqali buyurtmalaringizni ko'ring."
 
 
+STATUS_UZ = {"CONFIRMED": "Yangi", "IN_PROGRESS": "Ishlanmoqda", "READY": "Tayyor", "RECEIVED": "Qabul qilindi", "DIAGNOSIS": "Tekshiruvda"}
+
+
+def orders_reply(db: Session, customer_id: int) -> str:
+    orders = db.scalars(select(Order).options(joinedload(Order.product)).where(Order.customer_id == customer_id, Order.status.not_in(["DELIVERED", "CANCELLED"])).order_by(Order.id.desc())).all()
+    if not orders:
+        return "Sizda hozircha faol buyurtma yo'q."
+    return "📦 Buyurtmalaringiz:\n\n" + "\n".join(f"#{o.id} — {o.item_name or (o.product.name if o.product else 'Mahsulot')}\nHolati: {STATUS_UZ.get(o.status, o.status)}" for o in orders)
+
+
+def repairs_reply(db: Session, customer_id: int) -> str:
+    repairs = db.scalars(select(RepairOrder).where(RepairOrder.customer_id == customer_id, RepairOrder.status.not_in(["DELIVERED", "CANCELLED"])).order_by(RepairOrder.id.desc())).all()
+    if not repairs:
+        return "Sizda hozircha faol ta'mirlash buyurtmasi yo'q."
+    return "🔧 Ta'mirlash holati:\n\n" + "\n".join(f"#{r.id} — {r.device}\nHolati: {STATUS_UZ.get(r.status, r.status)}" for r in repairs)
+
+
 def handle_telegram_update(update: dict) -> None:
     message = update.get("message") or {}
     chat = message.get("chat") or {}
-    text_value = str(message.get("text") or "").strip()
     chat_id = str(chat.get("id") or "")
-    if not chat_id or not text_value:
+    if not chat_id:
         return
+    contact = message.get("contact") or {}
+    text_value = str(message.get("text") or "").strip()
     display_name = " ".join(value for value in [message.get("from", {}).get("first_name"), message.get("from", {}).get("last_name")] if value) or None
     with Session(engine) as db:
+        subscriber = db.scalar(select(TelegramSubscriber).where(TelegramSubscriber.chat_id == chat_id))
+        linked_id = subscriber.customer_id if subscriber else None
+
+        # 1) Telefon raqam ulashildi — o'zi bog'lanadi (havola shart emas)
+        if contact.get("phone_number"):
+            send_tg(chat_id, link_by_phone(db, chat_id, display_name, contact["phone_number"]), MAIN_MENU)
+            return
+
+        # 2) Do'kondan kelgan shaxsiy havola (/start link_...)
         if text_value.startswith("/start"):
             payload = text_value.removeprefix("/start").strip()
-            reply = link_telegram_by_token(db, chat_id, display_name, payload.removeprefix("link_")) if payload.startswith("link_") else "Optika OS botiga ulanish uchun optikadan yuborilgan shaxsiy Telegram havolasini bosing."
-        elif text_value.startswith("/buyurtmalar"):
-            subscriber = db.scalar(select(TelegramSubscriber).where(TelegramSubscriber.chat_id == chat_id))
-            if not subscriber or not subscriber.customer_id:
-                reply = "Avval /start va telefon raqamingiz orqali profilingizni bog'lang."
+            if payload.startswith("link_"):
+                send_tg(chat_id, link_telegram_by_token(db, chat_id, display_name, payload.removeprefix("link_")), MAIN_MENU)
+            elif linked_id:
+                send_tg(chat_id, "Xush kelibsiz! Pastdagi tugmalar bilan buyurtma va ta'mirlash holatingizni ko'ring.", MAIN_MENU)
             else:
-                orders = db.scalars(select(Order).options(joinedload(Order.product)).where(Order.customer_id == subscriber.customer_id, Order.status.not_in(["DELIVERED", "CANCELLED"])).order_by(Order.id.desc())).all()
-                reply = "Faol buyurtmalar topilmadi." if not orders else "Faol buyurtmalar:\n" + "\n".join(f"#{order.id} — {order.item_name or (order.product.name if order.product else 'Mahsulot')}: {order.status}" for order in orders)
-        elif text_value.startswith("/servis"):
-            subscriber = db.scalar(select(TelegramSubscriber).where(TelegramSubscriber.chat_id == chat_id))
-            if not subscriber or not subscriber.customer_id:
-                reply = "Avval optikadan yuborilgan shaxsiy havola orqali botga ulang."
-            else:
-                repairs = db.scalars(select(RepairOrder).where(RepairOrder.customer_id == subscriber.customer_id, RepairOrder.status.not_in(["DELIVERED", "CANCELLED"])).order_by(RepairOrder.id.desc())).all()
-                reply = "Faol servis buyurtmalari topilmadi." if not repairs else "Servis holati:\n" + "\n".join(f"#{repair.id} — {repair.device}: {repair.status}" for repair in repairs)
+                send_tg(chat_id, "Assalomu alaykum! Optika buyurtmalaringizni shu botda kuzatasiz.\n\nBoshlash uchun pastdagi \"📱 Telefon raqamni ulashish\" tugmasini bosing — optikadagi raqamingiz orqali avtomatik ulanasiz.", CONTACT_KB)
+            return
+
+        # 3) Tugmalar / buyruqlar
+        if not linked_id:
+            send_tg(chat_id, "Avval telefon raqamingizni ulang. Pastdagi tugmani bosing.", CONTACT_KB)
+            return
+        if "Buyurtma" in text_value or text_value.startswith("/buyurtmalar"):
+            send_tg(chat_id, orders_reply(db, linked_id), MAIN_MENU)
+        elif "mirlash" in text_value or "Ta'mir" in text_value or text_value.startswith("/servis"):
+            send_tg(chat_id, repairs_reply(db, linked_id), MAIN_MENU)
         else:
-            reply = "Buyruqlar: /buyurtmalar — faol buyurtmalar; /servis — ta'mirlash holati."
-    telegram_call("sendMessage", {"chat_id": chat_id, "text": reply})
+            send_tg(chat_id, "Nima ko'rmoqchisiz? Pastdagi tugmalardan birini tanlang:\n\n📦 Buyurtmalarim — faol buyurtmalaringiz\n🔧 Ta'mirlash — servis holati", MAIN_MENU)
 
 
 async def telegram_polling() -> None:
@@ -305,6 +372,12 @@ async def startup() -> None:
     with Session(engine) as db:
         seed(db)
     if settings.telegram_bot_token:
+        telegram_call("setMyCommands", {"commands": [
+            {"command": "start", "description": "Boshlash / ulanish"},
+            {"command": "buyurtmalar", "description": "Faol buyurtmalarim"},
+            {"command": "servis", "description": "Ta'mirlash holati"},
+        ]})
+        telegram_call("setChatMenuButton", {"menu_button": {"type": "commands"}})
         asyncio.create_task(telegram_polling())
         asyncio.create_task(reminder_scheduler())
 
