@@ -156,3 +156,34 @@
 .order-mode-switch { display: flex; gap: 6px; background: #f1f4f2; padding: 4px; border-radius: 9px; }
 .order-mode-switch button { flex: 1; border: 0; background: transparent; padding: 9px 10px; border-radius: 7px; font-size: 11px; font-weight: 800; color: #66736d; cursor: pointer; }
 .order-mode-switch button.active { background: #fff; color: var(--brand); box-shadow: 0 2px 6px #15251d14; }
+
+/* Yordam tugmasi (topbar '?') */
+.help-btn { width: 40px; height: 40px; border: 1px solid var(--line); background: #fff; border-radius: 10px; display: grid; place-items: center; cursor: pointer; color: var(--brand); }
+.help-btn:hover { background: var(--brand-soft); }
+.help-body { display: grid; gap: 12px; }
+.help-what { font-size: 13px; color: var(--ink); line-height: 1.5; margin: 0; }
+.help-label { font-size: 11px; color: var(--brand); font-weight: 800; }
+.help-steps { margin: 0; padding-left: 18px; display: grid; gap: 8px; }
+.help-steps li { font-size: 12px; color: #4a544f; line-height: 1.45; }
+
+/* Qo'llanma bo'limi */
+.guide-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.guide-card { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+.guide-card h3 { margin: 0 0 6px; font-size: 15px; color: var(--brand); }
+.guide-card p { margin: 0 0 12px; font-size: 12px; color: var(--muted); line-height: 1.5; }
+.guide-card ol { margin: 0; padding-left: 18px; display: grid; gap: 7px; }
+.guide-card li { font-size: 12px; color: #4a544f; line-height: 1.45; }
+
+/* Ilk kirish yo'l-yo'rig'i (tour) */
+.tour-bg { position: fixed; inset: 0; z-index: 40; background: #15231cb0; display: grid; place-items: end center; padding: 24px; }
+.tour-card { width: min(460px, 100%); background: #fff; border-radius: 18px; padding: 24px; box-shadow: 0 24px 70px #0005; margin-bottom: 6vh; }
+.tour-progress { display: flex; gap: 6px; margin-bottom: 14px; }
+.tour-progress span { height: 4px; flex: 1; border-radius: 3px; background: var(--line); }
+.tour-progress span.on { background: var(--brand); }
+.tour-card small { font-size: 10px; font-weight: 800; color: var(--brand); letter-spacing: 1px; }
+.tour-card h2 { font-size: 21px; margin: 6px 0 10px; letter-spacing: -.5px; }
+.tour-card p { font-size: 13px; color: #4a544f; line-height: 1.6; margin: 0 0 20px; }
+.tour-actions { display: flex; gap: 8px; align-items: center; }
+.tour-skip { border: 0; background: transparent; color: var(--muted); font-size: 12px; font-weight: 700; cursor: pointer; padding: 10px 4px; }
+.tour-back { border: 1px solid var(--line); background: #fff; border-radius: 9px; padding: 11px 16px; font-size: 12px; font-weight: 700; cursor: pointer; }
+.tour-next { margin-left: auto; border: 0; border-radius: 9px; padding: 12px 22px; font-size: 13px; font-weight: 700; cursor: pointer; }

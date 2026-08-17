@@ -1,8 +1,8 @@
 "use client";
 
 import {
-  Archive, Bell, Boxes, ChevronRight, CircleDollarSign, ClipboardList, CreditCard,
-  LayoutDashboard, Menu, Minus, PackagePlus, Plus, Search, ShoppingBag, Sparkles, Users, Wrench, X,
+  Archive, Bell, BookOpen, Boxes, ChevronRight, CircleDollarSign, ClipboardList, CreditCard,
+  HelpCircle, LayoutDashboard, Menu, Minus, PackagePlus, Plus, Search, ShoppingBag, Sparkles, Users, Wrench, X,
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import QRCode from "qrcode";
@@ -43,8 +43,43 @@ const seedOrders: Order[] = [
   { id: 1579, customer: "Jasur Aliyev", item: "Blue Cut 1.60", total: 890000, paid: 500000, status: "Yangi", date: "Kecha, 16:42" },
 ];
 const sections = [
-  ["Bosh sahifa", LayoutDashboard], ["Sotuv", ShoppingBag], ["Sotuvlar", CreditCard], ["Buyurtmalar", ClipboardList], ["Optik buyurtma", ClipboardList], ["Servis", Wrench], ["Mijozlar", Users], ["Aqlli yordamchi", Sparkles], ["Ombor", Boxes], ["Kassa", CircleDollarSign], ["Supplierlar", Archive], ["Filiallar", Archive], ["Xodimlar", Users], ["Hisobotlar", LayoutDashboard],
+  ["Bosh sahifa", LayoutDashboard], ["Sotuv", ShoppingBag], ["Sotuvlar", CreditCard], ["Buyurtmalar", ClipboardList], ["Optik buyurtma", ClipboardList], ["Servis", Wrench], ["Mijozlar", Users], ["Aqlli yordamchi", Sparkles], ["Ombor", Boxes], ["Kassa", CircleDollarSign], ["Supplierlar", Archive], ["Filiallar", Archive], ["Xodimlar", Users], ["Hisobotlar", LayoutDashboard], ["Qo'llanma", BookOpen],
 ] as const;
+
+// Rol bo'yicha ko'rinadigan bo'limlar. OWNER va MANAGER hammasini ko'radi.
+const ROLE_SECTIONS: Record<string, string[]> = {
+  SELLER: ["Bosh sahifa", "Sotuv", "Sotuvlar", "Buyurtmalar", "Mijozlar", "Kassa", "Qo'llanma"],
+  OPTOMETRIST: ["Bosh sahifa", "Optik buyurtma", "Mijozlar", "Aqlli yordamchi", "Buyurtmalar", "Qo'llanma"],
+  LAB_QC: ["Bosh sahifa", "Optik buyurtma", "Buyurtmalar", "Qo'llanma"],
+};
+
+// Har bir bo'lim uchun oddiy tildagi izoh: nima uchun va qanday ishlatiladi.
+const HELP: Record<string, { what: string; steps: string[] }> = {
+  "Bosh sahifa": { what: "Do'koningizning bugungi umumiy holati: tushum, faol buyurtmalar, mijozlar va qarzdorlik bir ekranda.", steps: ["Yuqoridagi kartalardan bugungi asosiy raqamlarni ko'ring", "'E'tibor kerak' bo'limi kam qolgan mahsulot va tayyor buyurtmalarni ogohlantiradi", "Tezkor +Mijoz yoki +Buyurtma tugmalari bilan darrov ish boshlang"] },
+  "Sotuv": { what: "Kassada tez sotuv qilish uchun. Mahsulotni savatchaga qo'shib, to'lovni yakunlaysiz.", steps: ["Chapdan mahsulotni bosing — savatchaga qo'shiladi", "Miqdorni + va - bilan o'zgartiring", "'To'lovni yakunlash' tugmasini bosing — sotuv saqlanadi va ombordan ayiriladi"] },
+  "Sotuvlar": { what: "Yakunlangan barcha sotuvlar tarixi. Kerak bo'lsa mahsulotni qaytarasiz.", steps: ["Sotuvni toping", "Mahsulot yonidagi 'Qaytarish' tugmasini bosing", "Sabab va holatni tanlab tasdiqlang"] },
+  "Buyurtmalar": { what: "Mijoz buyurtmalarini boshqarish: Yangi, Ishda, Tayyor, Topshirildi.", steps: ["'+ Yangi buyurtma' bilan buyurtma yarating (ro'yxatdan yoki qo'lda)", "'Keyingi' tugmasi bilan holatni bosqichma-bosqich o'tkazing", "Tayyor bo'lganda mijozga Telegram orqali avtomatik xabar ketadi"] },
+  "Optik buyurtma": { what: "Professional optika jarayoni: ramka tanlashdan tayyor ko'zoynakkacha bosqichma-bosqich.", steps: ["'+ Yangi optik karta' — mijoz va ramkani tanlang", "Ko'z tekshiruvi, Centration o'lchovi, Linza tanlovi, Laboratoriyaga yuborish", "Har bosqichda tugma o'zi keyingi kerakli qadamni ko'rsatadi"] },
+  "Servis": { what: "Ko'zoynak yoki ramka ta'mirlash buyurtmalarini qabul qilish va kuzatish.", steps: ["'+ Servis qabul qilish' — mijoz, buyum va nosozlikni yozing", "Narx va avansni kiriting", "'Keyingi' bilan holatni Tayyorgacha o'tkazing"] },
+  "Mijozlar": { what: "Mijozlar bazasi. Retsept, qarzdorlik va Telegram havolasini shu yerdan boshqarasiz.", steps: ["'+ Yangi mijoz' bilan mijoz qo'shing", "Mijozni bosib retsept (ko'rish o'lchovlari) kiriting", "Qarzi bo'lsa 'Qarz to'lovi' bilan to'lovni qabul qiling"] },
+  "Aqlli yordamchi": { what: "Mijozning retseptiga qarab qoidaga asoslangan optik tavsiyalar beradi (shifokorni almashtirmaydi).", steps: ["Mijozni tanlang", "'Tavsiya olish' tugmasini bosing", "Chiqqan tavsiyalarni mijozga tushuntiring"] },
+  "Ombor": { what: "Mahsulot qoldiqlari. Sotuv va buyurtma qoldiqni avtomatik kamaytiradi.", steps: ["'+ Mahsulot' bilan yangi tovar qo'shing", "'Kirim qilish' bilan qoldiqni oshiring", "Qizil 'kam qoldi' belgisi minimumdan past mahsulotni ko'rsatadi"] },
+  "Kassa": { what: "Kunlik kassa smenasi: ochish, yopish va xarajatlar.", steps: ["'Smenani ochish' — boshlang'ich summani kiriting", "Kun davomida '+ Xarajat' bilan chiqimlarni yozing", "Kun oxirida 'Smenani yopish' bilan hisobni yakunlang"] },
+  "Supplierlar": { what: "Yetkazib beruvchilar, ulardan kirim va ularga qarzdorlik.", steps: ["'+ Yangi supplier' qo'shing", "'+ Kirim' bilan supplierdan mahsulot qabul qiling", "Qarz bo'lsa 'To'lash' bilan to'lovni yozing"] },
+  "Filiallar": { what: "Bir nechta do'kon filialini va ulardagi xodimlarni boshqarish.", steps: ["'+ Filial qo'shish' — nom, kod va manzilni kiriting", "Filiallarni ro'yxatda ko'ring"] },
+  "Xodimlar": { what: "Tizim foydalanuvchilari va ularning rollari (Owner, Manager, Sotuvchi va boshqalar).", steps: ["'+ Xodim qo'shish' — login, parol va rol tanlang", "Har rol faqat o'ziga kerakli bo'limlarni ko'radi"] },
+  "Hisobotlar": { what: "Moliyaviy holat: sotuv, xarajat, sof foyda va qarzdorlik ko'rsatkichlari.", steps: ["Yuqoridagi kartalardan asosiy raqamlarni ko'ring", "'Operatsion jamlanma'da batafsil kirim va chiqimni ko'ring"] },
+};
+
+// Ilk kirishda ko'rsatiladigan bosqichma-bosqich yo'l-yo'riq.
+const TOUR: { section: string | null; title: string; text: string }[] = [
+  { section: "Bosh sahifa", title: "Optika OS'ga xush kelibsiz!", text: "Bu — do'koningizni boshqaradigan tizim. Sizga har bir asosiy qismni qisqacha ko'rsatamiz. Bu 6 qadam, 1 daqiqa vaqt oladi." },
+  { section: "Sotuv", title: "1. Sotuv (Kassa)", text: "Mijoz kelganda shu yerda tez sotuv qilasiz: mahsulotni bosib savatchaga qo'shasiz va to'lovni yakunlaysiz. Ombor qoldig'i o'zi kamayadi." },
+  { section: "Buyurtmalar", title: "2. Buyurtmalar", text: "Ko'zoynak buyurtmalarini shu yerda kuzatasiz: Yangi → Ishda → Tayyor → Topshirildi. Tayyor bo'lganda mijozga Telegram orqali xabar boradi." },
+  { section: "Mijozlar", title: "3. Mijozlar", text: "Mijoz qo'shasiz, retsept (ko'z o'lchovlari) kiritasiz va qarzdorlikni boshqarasiz. Mijozni bosib kartasini ochasiz." },
+  { section: "Ombor", title: "4. Ombor", text: "Mahsulot qoldiqlari shu yerda. Kam qolgan tovar qizil bilan belgilanadi va sizni ogohlantiradi." },
+  { section: null, title: "5. Yordam har doim yoningizda", text: "Har bir bo'lim tepasidagi '?' tugmasini bossangiz, o'sha bo'lim nima uchun va qanday ishlashini o'zbek tilida tushuntiradi. To'liq qo'llanma esa chapdagi 'Qo'llanma' bo'limida." },
+];
 const format = (value: number) => `${new Intl.NumberFormat("uz-UZ").format(value)} som`;
 const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api/v1";
 
@@ -75,6 +110,8 @@ export default function OptikaOS() {
   const [cart, setCart] = useState<CartLine[]>([]);
   const [query, setQuery] = useState("");
   const [manualOrder, setManualOrder] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [tourStep, setTourStep] = useState(-1);
   const [modal, setModal] = useState<"customer" | "order" | "stock" | "product" | "prescription" | "supplier" | "cash-open" | "cash-close" | "return" | "expense" | "customer-payment" | "supplier-payment" | "purchase" | "repair" | "user" | "branch" | "optical-case" | "eye-exam" | "centration" | "lens-config" | "lab-job" | "lab-qc" | null>(null);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [selectedSupplier, setSelectedSupplier] = useState<Supplier | null>(null);
@@ -102,6 +139,16 @@ export default function OptikaOS() {
   useEffect(() => {
     if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js");
   }, []);
+
+  useEffect(() => {
+    if (user && !localStorage.getItem("optika-tour-v1")) setTourStep(0);
+  }, [user]);
+
+  useEffect(() => {
+    if (tourStep >= 0 && tourStep < TOUR.length) { const s = TOUR[tourStep].section; if (s) setSection(s); }
+  }, [tourStep]);
+
+  const finishTour = () => { localStorage.setItem("optika-tour-v1", "1"); setTourStep(-1); setSection("Bosh sahifa"); };
 
   useEffect(() => {
     const sync = () => setIsOnline(navigator.onLine);
@@ -440,11 +487,11 @@ export default function OptikaOS() {
   return <main className="app-shell">
     <aside className={`side ${menu ? "show" : ""}`}>
       <div className="logo"><span>O</span><div>OPTIKA<small>BUSINESS OS</small></div></div>
-      <nav>{sections.map(([label, Icon]) => <button key={label} className={section === label ? "selected" : ""} onClick={() => { setSection(label); setMenu(false); }}><Icon size={19}/><span>{label}</span></button>)}</nav>
+      <nav>{sections.filter(([label]) => !ROLE_SECTIONS[user.role] || ROLE_SECTIONS[user.role].includes(label)).map(([label, Icon]) => <button key={label} className={section === label ? "selected" : ""} onClick={() => { setSection(label); setMenu(false); }}><Icon size={19}/><span>{label}</span></button>)}</nav>
       <div className="side-bottom"><small>OPTIKA OS</small><b>{user.username.charAt(0).toUpperCase() + user.username.slice(1)}</b><span>{cashShift ? "Bugun ochiq smena" : "Smena yopiq"}</span></div>
     </aside>
     <section className="main">
-      <header className="topbar"><button className="menu" onClick={() => setMenu(!menu)}><Menu/></button><div className="search-wrap"><div className="global-search"><Search size={18}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Mijoz, buyurtma yoki mahsulot qidiring"/>{query && <span>{searchResults.length} topildi</span>}</div>{searchResults.length > 0 && <div className="search-popover">{searchResults.map(result => <button key={`${result.type}-${result.id}`} onClick={() => { const target = result.type === "customer" ? "Mijozlar" : result.type === "product" ? "Ombor" : result.type === "order" ? "Buyurtmalar" : result.type === "supplier" ? "Supplierlar" : result.type === "repair" ? "Servis" : "Bosh sahifa"; setSection(target); setQuery(""); setNotice(`${result.title} — ${target} bo'limida`); }}><b>{result.title}</b><span>{result.type} · {result.subtitle}</span></button>)}</div>}</div><span className={`api-status ${backendOnline ? "online" : ""}`}>{backendOnline ? "API ulangan" : "Ulanmoqda"}</span><button className="bell" onClick={() => { if (systemNotifications.length) { const first = systemNotifications[0]; setSection(first.type === "LOW_STOCK" ? "Ombor" : first.type === "PRESCRIPTION_REMINDER" ? "Mijozlar" : "Buyurtmalar"); setNotice(`${first.title}: ${first.message}`); } else setNotice("Yangi bildirishnoma yo'q"); }}><Bell size={19}/>{systemNotifications.length > 0 && <i/>}</button><button className="account" onClick={signOut} title="Chiqish"><span className="avatar">{user.username.slice(0,2).toUpperCase()}</span><small>{user.role}</small></button></header>
+      <header className="topbar"><button className="menu" onClick={() => setMenu(!menu)}><Menu/></button><div className="search-wrap"><div className="global-search"><Search size={18}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Mijoz, buyurtma yoki mahsulot qidiring"/>{query && <span>{searchResults.length} topildi</span>}</div>{searchResults.length > 0 && <div className="search-popover">{searchResults.map(result => <button key={`${result.type}-${result.id}`} onClick={() => { const target = result.type === "customer" ? "Mijozlar" : result.type === "product" ? "Ombor" : result.type === "order" ? "Buyurtmalar" : result.type === "supplier" ? "Supplierlar" : result.type === "repair" ? "Servis" : "Bosh sahifa"; setSection(target); setQuery(""); setNotice(`${result.title} — ${target} bo'limida`); }}><b>{result.title}</b><span>{result.type} · {result.subtitle}</span></button>)}</div>}</div><span className={`api-status ${backendOnline ? "online" : ""}`}>{backendOnline ? "API ulangan" : "Ulanmoqda"}</span>{HELP[section] && <button className="help-btn" onClick={() => setHelpOpen(true)} title="Bu bo'lim bo'yicha yordam"><HelpCircle size={19}/></button>}<button className="bell" onClick={() => { if (systemNotifications.length) { const first = systemNotifications[0]; setSection(first.type === "LOW_STOCK" ? "Ombor" : first.type === "PRESCRIPTION_REMINDER" ? "Mijozlar" : "Buyurtmalar"); setNotice(`${first.title}: ${first.message}`); } else setNotice("Yangi bildirishnoma yo'q"); }}><Bell size={19}/>{systemNotifications.length > 0 && <i/>}</button><button className="account" onClick={signOut} title="Chiqish"><span className="avatar">{user.username.slice(0,2).toUpperCase()}</span><small>{user.role}</small></button></header>
       <div className="page">
         {notice && <button className="notice" onClick={() => setNotice("")}><b>✓</b>{notice}<X size={15}/></button>}
         {section === "Bosh sahifa" && <Dashboard revenue={revenue} debt={debt} customers={customers.length} orders={orders} lowStock={lowStock} go={setSection} setModal={setModal} statusTone={statusTone} userName={user.username}/>}
@@ -465,7 +512,8 @@ export default function OptikaOS() {
         {section === "Supplierlar" && <><div className="heading compact"><div><p>SUPPLIERLAR</p><h1>Yetkazib beruvchilar</h1><span>Kirim, to'lov va qarzdorlikni boshqaring.</span></div><div className="heading-actions"><button onClick={() => setModal("purchase")}>+ Kirim</button><button className="primary" onClick={() => setModal("supplier")}>+ Yangi supplier</button></div></div><section className="customer-grid">{suppliers.map(supplier => <article className="customer" key={supplier.id}><div className="customer-avatar">{supplier.name.slice(0,2).toUpperCase()}</div><div className="customer-info"><b>{supplier.name}</b><span>{supplier.phone || "Telefon kiritilmagan"}</span><small>{supplier.balance ? `Qarz: ${format(supplier.balance)}` : "Qarz yo'q"}</small></div>{supplier.balance > 0 && <button className="debt-action" onClick={() => { setSelectedSupplier(supplier); setModal("supplier-payment"); }}>To'lash</button>}</article>)}</section></>} 
         {section === "Xodimlar" && <><div className="heading compact"><div><p>XO'JALIK / XODIMLAR</p><h1>Foydalanuvchilar va rollar</h1><span>Owner, manager va sotuvchi huquqlarini boshqaring.</span></div>{user.role === "OWNER" && <button className="primary" onClick={() => setModal("user")}>+ Xodim qo'shish</button>}</div><section className="customer-grid">{team.map(member => <article className="customer" key={member.id}><div className="customer-avatar">{member.username.slice(0,2).toUpperCase()}</div><div className="customer-info"><b>{member.username}</b><span>{member.role}</span><small>{member.active ? "Faol foydalanuvchi" : "Nofaol foydalanuvchi"}</small></div><span className={`badge ${member.active ? "ready" : "neutral"}`}>{member.active ? "Faol" : "Nofaol"}</span></article>)}</section>{!team.length && <div className="empty"><Users/><b>Bu bo'lim faqat Owner uchun</b></div>}</>} 
         {section === "Hisobotlar" && <Reports report={finance}/>} 
-        {section === "Filiallar" && <><div className="heading compact"><div><p>KO'P FILIALLI BOSHQARUV</p><h1>Filiallar</h1><span>Filiallar va ulardagi xodimlar reyestri.</span></div>{user.role === "OWNER" && <button className="primary" onClick={() => setModal("branch")}>+ Filial qo'shish</button>}</div><section className="customer-grid">{branches.map(branch => <article className="customer" key={branch.id}><div className="customer-avatar">{branch.code.slice(0,2)}</div><div className="customer-info"><b>{branch.name}</b><span>{branch.address || "Manzil kiritilmagan"}</span><small>{branch.code} · {branch.members} xodim</small></div><span className={`badge ${branch.active ? "ready" : "neutral"}`}>{branch.active ? "Faol" : "Nofaol"}</span></article>)}</section></>} 
+        {section === "Filiallar" && <><div className="heading compact"><div><p>KO'P FILIALLI BOSHQARUV</p><h1>Filiallar</h1><span>Filiallar va ulardagi xodimlar reyestri.</span></div>{user.role === "OWNER" && <button className="primary" onClick={() => setModal("branch")}>+ Filial qo'shish</button>}</div><section className="customer-grid">{branches.map(branch => <article className="customer" key={branch.id}><div className="customer-avatar">{branch.code.slice(0,2)}</div><div className="customer-info"><b>{branch.name}</b><span>{branch.address || "Manzil kiritilmagan"}</span><small>{branch.code} · {branch.members} xodim</small></div><span className={`badge ${branch.active ? "ready" : "neutral"}`}>{branch.active ? "Faol" : "Nofaol"}</span></article>)}</section></>}
+        {section === "Qo'llanma" && <><div className="heading compact"><div><p>YORDAM / QO'LLANMA</p><h1>Ilovadan qanday foydalanamiz</h1><span>Har bir bo'lim nima uchun va qanday ishlatilishi — oddiy qadamlar bilan.</span></div><button className="primary" onClick={() => setTourStep(0)}><Sparkles size={16}/> Yo'l-yo'riqni qayta ko'rish</button></div><section className="guide-grid">{Object.entries(HELP).map(([name, info]) => <article className="guide-card" key={name}><h3>{name}</h3><p>{info.what}</p><ol>{info.steps.map((s, i) => <li key={i}>{s}</li>)}</ol></article>)}</section></>}
       </div>
     </section>
     {modal && <Modal title={modalTitle} close={() => setModal(null)}>
@@ -490,6 +538,8 @@ export default function OptikaOS() {
       {modal === "lens-config" && <form className="form" onSubmit={event => saveOpticalStep(event, "lens", "Linza konfiguratsiyasi saqlandi") }><p className="form-note">4-bosqich: retsept, rama va o'lchovga qarab tanlanadi.</p><label>Linza dizayni<select name="lens_design"><option value="SINGLE_VISION">Bir fokusli</option><option value="READING">O'qish uchun</option><option value="BIFOCAL">Bifokal</option><option value="PROGRESSIVE">Progressiv</option></select></label><label>Material indeksi<select name="material_index"><option value="1.50">1.50</option><option value="1.56">1.56</option><option value="1.60">1.60</option><option value="1.67">1.67</option><option value="1.74">1.74</option><option value="POLYCARBONATE">Polikarbonat</option></select></label><label>Qoplama<input name="coating" placeholder="Masalan, antirefleks"/></label><label className="check-label"><input name="photochromic" type="checkbox"/> Fotoxrom</label><label>Laboratoriya uchun izoh<input name="lab_note" placeholder="Kesim, qirra, rama qaydi"/></label><button className="primary">Linza tanlovini saqlash</button></form>}
       {modal === "lab-job" && <form className="form" onSubmit={event => saveOpticalStep(event, "lab", "Laboratoriyaga yuborildi") }><p className="form-note">5-bosqich: laboratoriya topshirig'i yaratiladi.</p><label>Laboratoriya nomi<input name="laboratory" placeholder="Masalan, Essilor Lab"/></label><label>Lab raqami<input name="job_reference" placeholder="LAB-2026-001"/></label><button className="primary">Laboratoriyaga yuborish</button></form>}
     </Modal>}
+    {helpOpen && HELP[section] && <Modal title={`${section} — yordam`} close={() => setHelpOpen(false)}><div className="help-body"><p className="help-what">{HELP[section].what}</p><b className="help-label">Qanday ishlatiladi:</b><ol className="help-steps">{HELP[section].steps.map((s, i) => <li key={i}>{s}</li>)}</ol></div></Modal>}
+    {tourStep >= 0 && tourStep < TOUR.length && <div className="tour-bg"><div className="tour-card"><div className="tour-progress">{TOUR.map((_, i) => <span key={i} className={i === tourStep ? "on" : ""}/>)}</div><small>QADAM {tourStep + 1} / {TOUR.length}</small><h2>{TOUR[tourStep].title}</h2><p>{TOUR[tourStep].text}</p><div className="tour-actions"><button className="tour-skip" onClick={finishTour}>O'tkazib yuborish</button>{tourStep > 0 && <button className="tour-back" onClick={() => setTourStep(tourStep - 1)}>Orqaga</button>}<button className="tour-next primary" onClick={() => { if (tourStep + 1 >= TOUR.length) finishTour(); else setTourStep(tourStep + 1); }}>{tourStep + 1 >= TOUR.length ? "Tayyor!" : "Keyingi"}</button></div></div></div>}
   </main>;
 }
 
