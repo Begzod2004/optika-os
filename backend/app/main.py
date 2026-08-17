@@ -112,7 +112,11 @@ def send_telegram(db: Session, customer_id: int, message: str) -> None:
 
 
 # Mijoz uchun doimiy tugmalar (buyruq yozish shart emas).
-MAIN_MENU = {"keyboard": [[{"text": "📦 Buyurtmalarim"}, {"text": "🔧 Ta'mirlash"}], [{"text": "ℹ️ Yordam"}]], "resize_keyboard": True}
+MAIN_MENU = {"keyboard": [[{"text": "📦 Buyurtmalarim"}, {"text": "🔧 Ta'mirlash"}], [{"text": "👓 Retseptim"}, {"text": "💳 Qarzim"}], [{"text": "ℹ️ Yordam"}]], "resize_keyboard": True}
+
+
+def som(value: int | None) -> str:
+    return f"{value or 0:,}".replace(",", " ") + " so'm"
 CONTACT_KB = {"keyboard": [[{"text": "📱 Telefon raqamni ulashish", "request_contact": True}]], "resize_keyboard": True, "one_time_keyboard": True}
 
 
@@ -121,6 +125,15 @@ def send_tg(chat_id: str, text: str, keyboard: dict | None = None) -> None:
     if keyboard is not None:
         payload["reply_markup"] = keyboard
     telegram_call("sendMessage", payload)
+
+
+def notify_order_created(db: Session, order: Order, name: str) -> None:
+    balance = order.total - order.paid
+    text = f"✅ Buyurtmangiz qabul qilindi!\n\n🔖 #{order.id} — {name}\nSumma: {som(order.total)} · To'langan: {som(order.paid)}"
+    if balance > 0:
+        text += f"\nQoldiq to'lov: {som(balance)}"
+    text += "\n\nTayyor bo'lganda sizga shu yerda xabar beramiz."
+    send_telegram(db, order.customer_id, text)
 
 
 def phone_digits(value: str) -> str:
@@ -190,14 +203,50 @@ def orders_reply(db: Session, customer_id: int) -> str:
     orders = db.scalars(select(Order).options(joinedload(Order.product)).where(Order.customer_id == customer_id, Order.status.not_in(["DELIVERED", "CANCELLED"])).order_by(Order.id.desc())).all()
     if not orders:
         return "Sizda hozircha faol buyurtma yo'q."
-    return "📦 Buyurtmalaringiz:\n\n" + "\n".join(f"#{o.id} — {o.item_name or (o.product.name if o.product else 'Mahsulot')}\nHolati: {STATUS_UZ.get(o.status, o.status)}" for o in orders)
+    lines = []
+    for o in orders:
+        name = o.item_name or (o.product.name if o.product else "Mahsulot")
+        balance = o.total - o.paid
+        line = f"🔖 #{o.id} — {name}\nHolati: {STATUS_UZ.get(o.status, o.status)}\nSumma: {som(o.total)} · To'langan: {som(o.paid)}"
+        if balance > 0:
+            line += f"\nQoldiq to'lov: {som(balance)}"
+        lines.append(line)
+    return "📦 Buyurtmalaringiz:\n\n" + "\n\n".join(lines)
 
 
 def repairs_reply(db: Session, customer_id: int) -> str:
     repairs = db.scalars(select(RepairOrder).where(RepairOrder.customer_id == customer_id, RepairOrder.status.not_in(["DELIVERED", "CANCELLED"])).order_by(RepairOrder.id.desc())).all()
     if not repairs:
         return "Sizda hozircha faol ta'mirlash buyurtmasi yo'q."
-    return "🔧 Ta'mirlash holati:\n\n" + "\n".join(f"#{r.id} — {r.device}\nHolati: {STATUS_UZ.get(r.status, r.status)}" for r in repairs)
+    lines = []
+    for r in repairs:
+        line = f"🔧 #{r.id} — {r.device}\nHolati: {STATUS_UZ.get(r.status, r.status)}\nNarx: {som(r.estimated_cost)}"
+        if r.estimated_cost - r.paid > 0:
+            line += f" · Qoldiq: {som(r.estimated_cost - r.paid)}"
+        lines.append(line)
+    return "🔧 Ta'mirlash holati:\n\n" + "\n\n".join(lines)
+
+
+def prescription_reply(db: Session, customer_id: int) -> str:
+    p = db.scalar(select(Prescription).where(Prescription.customer_id == customer_id).order_by(Prescription.created_at.desc()))
+    if not p:
+        return "👓 Sizda hali retsept yo'q. Optikada ko'z tekshiruvidan o'ting."
+    parts = ["👓 Oxirgi retseptingiz:\n"]
+    parts.append(f"O'ng ko'z (OD): SPH {p.od_sph or '—'} · CYL {p.od_cyl or '—'} · AXIS {p.od_axis if p.od_axis is not None else '—'}")
+    parts.append(f"Chap ko'z (OS): SPH {p.os_sph or '—'} · CYL {p.os_cyl or '—'} · AXIS {p.os_axis if p.os_axis is not None else '—'}")
+    if p.pd is not None:
+        parts.append(f"PD: {p.pd} mm")
+    if p.note:
+        parts.append(f"Izoh: {p.note}")
+    parts.append("\nEslatma: bu ma'lumot shifokor tekshiruvini almashtirmaydi.")
+    return "\n".join(parts)
+
+
+def debt_reply(db: Session, customer_id: int) -> str:
+    customer = db.get(Customer, customer_id)
+    if not customer or customer.debt <= 0:
+        return "💳 Sizda qarzdorlik yo'q. Rahmat!"
+    return f"💳 Joriy qarzdorligingiz: {som(customer.debt)}\n\nTo'lovni optikada amalga oshirishingiz mumkin."
 
 
 def handle_telegram_update(update: dict) -> None:
@@ -237,8 +286,12 @@ def handle_telegram_update(update: dict) -> None:
             send_tg(chat_id, orders_reply(db, linked_id), MAIN_MENU)
         elif "mirlash" in text_value or "Ta'mir" in text_value or text_value.startswith("/servis"):
             send_tg(chat_id, repairs_reply(db, linked_id), MAIN_MENU)
+        elif "Retsept" in text_value or "Retseptim" in text_value:
+            send_tg(chat_id, prescription_reply(db, linked_id), MAIN_MENU)
+        elif "Qarz" in text_value:
+            send_tg(chat_id, debt_reply(db, linked_id), MAIN_MENU)
         else:
-            send_tg(chat_id, "Nima ko'rmoqchisiz? Pastdagi tugmalardan birini tanlang:\n\n📦 Buyurtmalarim — faol buyurtmalaringiz\n🔧 Ta'mirlash — servis holati", MAIN_MENU)
+            send_tg(chat_id, "Nima ko'rmoqchisiz? Pastdagi tugmalardan birini tanlang:\n\n📦 Buyurtmalarim — faol buyurtmalar\n🔧 Ta'mirlash — servis holati\n👓 Retseptim — ko'z o'lchovlaringiz\n💳 Qarzim — qarzdorlik", MAIN_MENU)
 
 
 async def telegram_polling() -> None:
@@ -808,6 +861,7 @@ def create_order(payload: OrderCreate, db: Session = Depends(get_db), _: User = 
         order = Order(customer=customer, product=product, item_name=product.name, total=product.sale_price, paid=payload.paid, status="CONFIRMED")
         db.add(order); db.flush(); stock_movement(db, product, -1, "ORDER_RESERVE", "ORDER", order.id, "Buyurtma uchun rezerv"); audit(db, _, "CREATE", "ORDER", order.id, f"Buyurtma yaratildi: {product.name}"); db.commit(); db.refresh(order)
         db.refresh(order, attribute_names=["customer", "product"])
+        notify_order_created(db, order, product.name)
         return ok(order_data(order))
     item_name = (payload.item_name or "").strip()
     if not item_name:
@@ -819,6 +873,7 @@ def create_order(payload: OrderCreate, db: Session = Depends(get_db), _: User = 
     order = Order(customer=customer, product=None, item_name=item_name, total=total, paid=payload.paid, status="CONFIRMED")
     db.add(order); db.flush(); audit(db, _, "CREATE", "ORDER", order.id, f"Qo'lda buyurtma yaratildi: {item_name}"); db.commit(); db.refresh(order)
     db.refresh(order, attribute_names=["customer"])
+    notify_order_created(db, order, item_name)
     return ok(order_data(order))
 
 
