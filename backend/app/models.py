@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String
+from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -8,11 +8,14 @@ from .database import Base
 
 class Customer(Base):
     __tablename__ = "customers"
+    # Telefon unikalligi filial darajasida: har filial o'z mijozlar daftarini yuritadi.
+    __table_args__ = (UniqueConstraint("branch_id", "phone", name="uq_customers_branch_phone"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(150))
-    phone: Mapped[str] = mapped_column(String(30), unique=True, index=True)
+    phone: Mapped[str] = mapped_column(String(30), index=True)
     debt: Mapped[int] = mapped_column(Integer, default=0)
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -59,6 +62,7 @@ class Product(Base):
     sale_price: Mapped[int] = mapped_column(Integer)
     stock: Mapped[int] = mapped_column(Integer, default=0)
     minimum_stock: Mapped[int] = mapped_column(Integer, default=0)
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"), nullable=True, index=True)
 
 
 class StockMovement(Base):
@@ -148,6 +152,7 @@ class CashShift(Base):
     expected_amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
     actual_amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="OPEN", index=True)
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"), nullable=True, index=True)
     opened_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -173,6 +178,7 @@ class Expense(Base):
     amount: Mapped[int] = mapped_column(Integer)
     description: Mapped[str | None] = mapped_column(String(300), nullable=True)
     cash_shift_id: Mapped[int | None] = mapped_column(ForeignKey("cash_shifts.id"), nullable=True)
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -186,6 +192,7 @@ class Order(Base):
     total: Mapped[int] = mapped_column(Integer)
     paid: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(30), default="CONFIRMED")
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     customer: Mapped[Customer] = relationship()
     product: Mapped[Product | None] = relationship()
@@ -199,6 +206,7 @@ class Sale(Base):
     total: Mapped[int] = mapped_column(Integer)
     paid: Mapped[int] = mapped_column(Integer)
     payment_method: Mapped[str] = mapped_column(String(30), default="CASH")
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     customer: Mapped[Customer | None] = relationship()
     items: Mapped[list["SaleItem"]] = relationship(cascade="all, delete-orphan")
@@ -243,6 +251,7 @@ class RepairOrder(Base):
     status: Mapped[str] = mapped_column(String(30), default="RECEIVED", index=True)
     technician_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
     due_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     customer: Mapped[Customer] = relationship()
 
@@ -310,6 +319,7 @@ class OpticalCase(Base):
     chief_complaint: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="FRAME_SELECTED", index=True)
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     customer: Mapped[Customer] = relationship(foreign_keys=[customer_id])
     frame_product: Mapped[Product | None] = relationship(foreign_keys=[frame_product_id])

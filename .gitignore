@@ -8,3 +8,4 @@ backend/backups/
 backend/*.db
 *.pyc
 graphify-out/
+frontend/tsconfig.tsbuildinfo

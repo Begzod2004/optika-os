@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 class CustomerCreate(BaseModel):
     name: str = Field(min_length=2, max_length=150)
     phone: str = Field(min_length=7, max_length=30)
+    branch_id: int | None = None
 
 
 class LoginInput(BaseModel):
@@ -45,6 +46,7 @@ class PurchaseCreate(BaseModel):
 
 class CashShiftOpen(BaseModel):
     opening_amount: int = Field(ge=0)
+    branch_id: int | None = None
 
 
 class CashShiftClose(BaseModel):
@@ -62,6 +64,8 @@ class ExpenseCreate(BaseModel):
     category: str = Field(min_length=2, max_length=80)
     amount: int = Field(gt=0)
     description: str | None = Field(default=None, max_length=300)
+    branch_id: int | None = None
+
 
 
 class SupplierPaymentCreate(BaseModel):
@@ -81,6 +85,7 @@ class ProductCreate(BaseModel):
     sale_price: int = Field(gt=0)
     stock: int = Field(ge=0)
     minimum_stock: int = Field(default=0, ge=0)
+    branch_id: int | None = None
 
 
 class StockReceive(BaseModel):

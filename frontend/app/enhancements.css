@@ -217,3 +217,16 @@
   body { overscroll-behavior-y: contain; }
   .pwa-install { display: none !important; }
 }
+
+/* ===== Toast: topbar OSTIDA, rang bilan (xato qizil) ===== */
+.notice { top: calc(76px + env(safe-area-inset-top, 0px) + 10px); z-index: 15; }
+.notice.error { border-color: #f3c6c0; background: #fff3f1; color: #a6372c; }
+.notice.error b { color: #a6372c; }
+.notice.info { border-color: #ccd9ea; }
+.notice.info b { color: #476ea6; }
+.branch-warning { margin-bottom: 16px; border: 1px solid #f3c6c0; border-radius: 9px; padding: 11px 13px; background: #fff3f1; color: #a6372c; font-size: 12px; font-weight: 700; }
+.search-clear { border: 0; background: transparent; color: #89958e; display: grid; place-items: center; cursor: pointer; padding: 2px; }
+.primary:disabled, .checkout:disabled { opacity: .55; cursor: not-allowed; }
+@media (max-width: 760px) {
+  .notice { left: 16px; right: 16px; top: calc(76px + env(safe-area-inset-top, 0px) + 9px); }
+}

@@ -81,8 +81,9 @@ def ok(data: object) -> dict:
     return {"success": True, "data": data}
 
 
-def user_data(user: User) -> dict:
-    return {"id": user.id, "username": user.username, "role": user.role}
+def user_data(db: Session, user: User) -> dict:
+    branch = user_branch(db, user)
+    return {"id": user.id, "username": user.username, "role": user.role, "branch": {"id": branch.id, "name": branch.name} if branch else None}
 
 
 def audit(db: Session, user: User | None, action: str, entity_type: str, entity_id: int | None, summary: str) -> None:
@@ -105,8 +106,21 @@ def telegram_call(method: str, payload: dict) -> dict | None:
         return None
 
 
+def related_customer_ids(db: Session, customer_id: int) -> list[int]:
+    # Bitta mijoz har filialda alohida qator bo'lishi mumkin — telefon oxirgi 9 raqami bo'yicha birlashtiramiz.
+    customer = db.get(Customer, customer_id)
+    if not customer:
+        return [customer_id]
+    tail = phone_digits(customer.phone)[-9:]
+    if len(tail) < 9:
+        return [customer.id]
+    ids = [row.id for row in db.scalars(select(Customer)) if phone_digits(row.phone).endswith(tail)]
+    return ids or [customer.id]
+
+
 def send_telegram(db: Session, customer_id: int, message: str) -> None:
-    chat_ids = db.scalars(select(TelegramSubscriber.chat_id).where(TelegramSubscriber.customer_id == customer_id)).all()
+    ids = related_customer_ids(db, customer_id)
+    chat_ids = db.scalars(select(TelegramSubscriber.chat_id).where(TelegramSubscriber.customer_id.in_(ids))).all()
     for chat_id in chat_ids:
         send_tg(chat_id, message, MAIN_MENU)
 
@@ -200,7 +214,7 @@ STATUS_UZ = {"CONFIRMED": "Yangi", "IN_PROGRESS": "Ishlanmoqda", "READY": "Tayyo
 
 
 def orders_reply(db: Session, customer_id: int) -> str:
-    orders = db.scalars(select(Order).options(joinedload(Order.product)).where(Order.customer_id == customer_id, Order.status.not_in(["DELIVERED", "CANCELLED"])).order_by(Order.id.desc())).all()
+    orders = db.scalars(select(Order).options(joinedload(Order.product)).where(Order.customer_id.in_(related_customer_ids(db, customer_id)), Order.status.not_in(["DELIVERED", "CANCELLED"])).order_by(Order.id.desc())).all()
     if not orders:
         return "Sizda hozircha faol buyurtma yo'q."
     lines = []
@@ -215,7 +229,7 @@ def orders_reply(db: Session, customer_id: int) -> str:
 
 
 def repairs_reply(db: Session, customer_id: int) -> str:
-    repairs = db.scalars(select(RepairOrder).where(RepairOrder.customer_id == customer_id, RepairOrder.status.not_in(["DELIVERED", "CANCELLED"])).order_by(RepairOrder.id.desc())).all()
+    repairs = db.scalars(select(RepairOrder).where(RepairOrder.customer_id.in_(related_customer_ids(db, customer_id)), RepairOrder.status.not_in(["DELIVERED", "CANCELLED"])).order_by(RepairOrder.id.desc())).all()
     if not repairs:
         return "Sizda hozircha faol ta'mirlash buyurtmasi yo'q."
     lines = []
@@ -228,7 +242,7 @@ def repairs_reply(db: Session, customer_id: int) -> str:
 
 
 def prescription_reply(db: Session, customer_id: int) -> str:
-    p = db.scalar(select(Prescription).where(Prescription.customer_id == customer_id).order_by(Prescription.created_at.desc()))
+    p = db.scalar(select(Prescription).where(Prescription.customer_id.in_(related_customer_ids(db, customer_id))).order_by(Prescription.created_at.desc()))
     if not p:
         return "👓 Sizda hali retsept yo'q. Optikada ko'z tekshiruvidan o'ting."
     parts = ["👓 Oxirgi retseptingiz:\n"]
@@ -243,10 +257,10 @@ def prescription_reply(db: Session, customer_id: int) -> str:
 
 
 def debt_reply(db: Session, customer_id: int) -> str:
-    customer = db.get(Customer, customer_id)
-    if not customer or customer.debt <= 0:
+    total = db.scalar(select(func.coalesce(func.sum(Customer.debt), 0)).where(Customer.id.in_(related_customer_ids(db, customer_id)))) or 0
+    if total <= 0:
         return "💳 Sizda qarzdorlik yo'q. Rahmat!"
-    return f"💳 Joriy qarzdorligingiz: {som(customer.debt)}\n\nTo'lovni optikada amalga oshirishingiz mumkin."
+    return f"💳 Joriy qarzdorligingiz: {som(total)}\n\nTo'lovni optikada amalga oshirishingiz mumkin."
 
 
 def handle_telegram_update(update: dict) -> None:
@@ -347,6 +361,45 @@ def require_roles(*roles: str):
     return check
 
 
+# Filial izolyatsiyasi: scoped rollar faqat o'z filialini ko'radi/yozadi, OWNER/MANAGER filtrsiz.
+SCOPED_ROLES = {"SELLER", "OPTOMETRIST", "LAB_QC"}
+NO_BRANCH = -1  # biriktirilmagan scoped foydalanuvchi: hech qaysi qatorga mos kelmaydi
+
+
+def user_branch(db: Session, user: User) -> Branch | None:
+    return db.scalar(select(Branch).join(UserBranch, UserBranch.branch_id == Branch.id).where(UserBranch.user_id == user.id).order_by(UserBranch.id))
+
+
+def user_branch_id(db: Session, user: User) -> int | None:
+    return db.scalar(select(UserBranch.branch_id).where(UserBranch.user_id == user.id).order_by(UserBranch.id))
+
+
+def read_branch_id(db: Session, user: User) -> int | None:
+    if user.role not in SCOPED_ROLES:
+        return None
+    return user_branch_id(db, user) or NO_BRANCH
+
+
+def write_branch_id(db: Session, user: User, payload_branch_id: int | None = None) -> int | None:
+    if user.role in SCOPED_ROLES:
+        bid = user_branch_id(db, user)
+        if bid is None:
+            raise HTTPException(400, "Siz hech qaysi filialga biriktirilmagansiz. Administratordan filialga biriktirishni so'rang.")
+        return bid
+    if payload_branch_id is not None:
+        if not db.get(Branch, payload_branch_id):
+            raise HTTPException(404, "Filial topilmadi")
+        return payload_branch_id
+    return user_branch_id(db, user)
+
+
+def ensure_branch(bid: int | None, obj_branch_id: int | None, message: str) -> None:
+    if bid == NO_BRANCH:
+        raise HTTPException(400, "Siz hech qaysi filialga biriktirilmagansiz. Administratordan filialga biriktirishni so'rang.")
+    if bid is not None and obj_branch_id != bid:
+        raise HTTPException(404, message)
+
+
 def customer_data(customer: Customer) -> dict:
     return {"id": customer.id, "name": customer.name, "phone": customer.phone, "debt": customer.debt}
 
@@ -364,11 +417,14 @@ def supplier_data(supplier: Supplier) -> dict:
 
 
 def cash_shift_data(shift: CashShift) -> dict:
-    return {"id": shift.id, "opening_amount": shift.opening_amount, "expected_amount": shift.expected_amount, "actual_amount": shift.actual_amount, "difference": (shift.actual_amount - shift.expected_amount) if shift.actual_amount is not None and shift.expected_amount is not None else None, "status": shift.status, "opened_at": shift.opened_at, "closed_at": shift.closed_at}
+    return {"id": shift.id, "branch_id": shift.branch_id, "opening_amount": shift.opening_amount, "expected_amount": shift.expected_amount, "actual_amount": shift.actual_amount, "difference": (shift.actual_amount - shift.expected_amount) if shift.actual_amount is not None and shift.expected_amount is not None else None, "status": shift.status, "opened_at": shift.opened_at, "closed_at": shift.closed_at}
 
 
-def open_shift(db: Session) -> CashShift | None:
-    return db.scalar(select(CashShift).where(CashShift.status == "OPEN").order_by(CashShift.opened_at.desc()))
+def open_shift(db: Session, branch_id: int | None) -> CashShift | None:
+    # branch_id None (filialsiz OWNER) -> hech qaysi smena: pul boshqa filial kassasiga tushmasin.
+    if branch_id is None:
+        return None
+    return db.scalar(select(CashShift).where(CashShift.status == "OPEN", CashShift.branch_id == branch_id).order_by(CashShift.opened_at.desc()))
 
 
 def stock_movement(db: Session, product: Product, quantity: int, movement_type: str, reference_type: str, reference_id: int | None, note: str | None = None) -> None:
@@ -392,31 +448,10 @@ def optical_case_data(db: Session, item: OpticalCase) -> dict:
 
 
 def seed(db: Session) -> None:
-    if not db.scalar(select(func.count(Branch.id))):
-        db.add(Branch(name="Chilonzor filiali", code="CHIL-01", address="Toshkent, Chilonzor"))
-        db.commit()
+    # Faqat bo'sh bazada boshlang'ich admin. Demo ma'lumotlar yaratilmaydi — real ish rejimi.
     if not db.scalar(select(func.count(User.id))):
-        db.add_all([
-            User(username="admin", password_hash=password_hash.hash("admin123"), role="OWNER"),
-            User(username="sotuvchi", password_hash=password_hash.hash("seller123"), role="SELLER"),
-        ])
+        db.add(User(username="admin", password_hash=password_hash.hash("admin123"), role="OWNER"))
         db.commit()
-    if not db.scalar(select(User).where(User.username == "optometrist")):
-        db.add(User(username="optometrist", password_hash=password_hash.hash("optometrist123"), role="OPTOMETRIST"))
-        db.commit()
-    if not db.scalar(select(func.count(Supplier.id))):
-        db.add_all([Supplier(name="Optika Distribyutor", phone="+998901112233"), Supplier(name="Essilor Uzbekistan", phone="+998935556677")])
-        db.commit()
-    if db.scalar(select(func.count(Product.id))):
-        return
-    customers = [Customer(name="Aziz Akbarov", phone="+998901234567", debt=500000), Customer(name="Madina Karimova", phone="+998935552020")]
-    products = [
-        Product(name="RB 3447 Round", brand="Ray-Ban", category="FRAME", sale_price=850000, stock=6, minimum_stock=3),
-        Product(name="Blue Cut 1.60", brand="Essilor", category="LENS", sale_price=300000, stock=18, minimum_stock=8),
-        Product(name="Classic Black Case", brand="Optika", category="ACCESSORY", sale_price=50000, stock=4, minimum_stock=5),
-    ]
-    db.add_all(customers + products)
-    db.commit()
 
 
 @app.on_event("startup")
@@ -482,21 +517,30 @@ def login(payload: LoginInput, request: Request, db: Session = Depends(get_db)) 
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login yoki parol notogri")
     if not user.active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Foydalanuvchi faol emas")
-    return ok({"access_token": create_token(user), "token_type": "bearer", "user": user_data(user)})
+    return ok({"access_token": create_token(user), "token_type": "bearer", "user": user_data(db, user)})
 
 
 @app.get("/api/v1/auth/me")
-def me(user: User = Depends(current_user)) -> dict:
-    return ok(user_data(user))
+def me(db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    return ok(user_data(db, user))
 
 
 @app.get("/api/v1/bootstrap")
 def bootstrap(db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
-    customers = list(db.scalars(select(Customer).order_by(Customer.id.desc())))
-    products = list(db.scalars(select(Product).order_by(Product.id.desc())))
-    orders = list(db.scalars(select(Order).options(joinedload(Order.customer), joinedload(Order.product)).order_by(Order.id.desc())))
+    bid = read_branch_id(db, _)
+    customers_q = select(Customer).order_by(Customer.id.desc())
+    products_q = select(Product).order_by(Product.id.desc())
+    orders_q = select(Order).options(joinedload(Order.customer), joinedload(Order.product)).order_by(Order.id.desc())
+    if bid is not None:
+        customers_q = customers_q.where(Customer.branch_id == bid)
+        products_q = products_q.where(Product.branch_id == bid)
+        orders_q = orders_q.where(Order.branch_id == bid)
+    customers = list(db.scalars(customers_q))
+    products = list(db.scalars(products_q))
+    orders = list(db.scalars(orders_q))
     suppliers = list(db.scalars(select(Supplier).order_by(Supplier.name)))
-    return ok({"customers": [customer_data(c) for c in customers], "products": [product_data(p) for p in products], "orders": [order_data(o) for o in orders], "suppliers": [supplier_data(s) for s in suppliers], "cash_shift": cash_shift_data(open_shift(db)) if open_shift(db) else None})
+    shift = open_shift(db, bid if bid is not None else user_branch_id(db, _))
+    return ok({"customers": [customer_data(c) for c in customers], "products": [product_data(p) for p in products], "orders": [order_data(o) for o in orders], "suppliers": [supplier_data(s) for s in suppliers], "cash_shift": cash_shift_data(shift) if shift else None})
 
 
 @app.get("/api/v1/search")
@@ -504,19 +548,35 @@ def global_search(q: str, db: Session = Depends(get_db), _: User = Depends(curre
     needle = q.strip()
     if len(needle) < 2:
         return ok([])
-    customers = db.scalars(select(Customer).where(Customer.name.ilike(f"%{needle}%") | Customer.phone.ilike(f"%{needle}%")).limit(5))
-    products = db.scalars(select(Product).where(Product.name.ilike(f"%{needle}%") | Product.brand.ilike(f"%{needle}%")).limit(5))
-    orders = db.scalars(select(Order).options(joinedload(Order.customer)).where(Order.id.cast(String).ilike(f"%{needle}%")).limit(5))
+    bid = read_branch_id(db, _)
+    customers_q = select(Customer).where(Customer.name.ilike(f"%{needle}%") | Customer.phone.ilike(f"%{needle}%"))
+    products_q = select(Product).where(Product.name.ilike(f"%{needle}%") | Product.brand.ilike(f"%{needle}%"))
+    orders_q = select(Order).options(joinedload(Order.customer)).where(Order.id.cast(String).ilike(f"%{needle}%"))
+    if bid is not None:
+        customers_q = customers_q.where(Customer.branch_id == bid)
+        products_q = products_q.where(Product.branch_id == bid)
+        orders_q = orders_q.where(Order.branch_id == bid)
+    customers = db.scalars(customers_q.limit(5))
+    products = db.scalars(products_q.limit(5))
+    orders = db.scalars(orders_q.limit(5))
     result = ([{"type": "customer", "id": row.id, "title": row.name, "subtitle": row.phone} for row in customers] + [{"type": "product", "id": row.id, "title": row.name, "subtitle": f"{row.brand} · {row.stock} dona"} for row in products] + [{"type": "order", "id": row.id, "title": f"Buyurtma #{row.id}", "subtitle": row.customer.name} for row in orders])
     return ok(result)
 
 
 @app.get("/api/v1/notifications")
 def notifications(db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
-    ready = list(db.scalars(select(Order).options(joinedload(Order.customer)).where(Order.status == "READY").order_by(Order.id.desc()).limit(10)))
-    low = list(db.scalars(select(Product).where(Product.stock <= Product.minimum_stock).order_by(Product.stock).limit(10)))
+    bid = read_branch_id(db, _)
+    ready_q = select(Order).options(joinedload(Order.customer)).where(Order.status == "READY")
+    low_q = select(Product).where(Product.stock <= Product.minimum_stock)
     now = datetime.utcnow()
-    due = list(db.scalars(select(Prescription).options(joinedload(Prescription.customer)).where(Prescription.reminder_at.is_not(None), Prescription.reminder_at <= now, Prescription.reminder_at >= now - timedelta(days=60)).order_by(Prescription.reminder_at.desc()).limit(10)))
+    due_q = select(Prescription).options(joinedload(Prescription.customer)).where(Prescription.reminder_at.is_not(None), Prescription.reminder_at <= now, Prescription.reminder_at >= now - timedelta(days=60))
+    if bid is not None:
+        ready_q = ready_q.where(Order.branch_id == bid)
+        low_q = low_q.where(Product.branch_id == bid)
+        due_q = due_q.join(Customer, Prescription.customer_id == Customer.id).where(Customer.branch_id == bid)
+    ready = list(db.scalars(ready_q.order_by(Order.id.desc()).limit(10)))
+    low = list(db.scalars(low_q.order_by(Product.stock).limit(10)))
+    due = list(db.scalars(due_q.order_by(Prescription.reminder_at.desc()).limit(10)))
     result = ([{"type": "ORDER_READY", "severity": "success", "title": f"Buyurtma #{order.id} tayyor", "message": f"{order.customer.name}ga topshirish kerak", "entity_id": order.id} for order in ready] + [{"type": "PRESCRIPTION_REMINDER", "severity": "warning", "title": f"{presc.customer.name}ni tekshiruvga chaqiring", "message": f"Retsept eslatmasi vaqti keldi ({presc.reminder_at.strftime('%d.%m.%Y')})", "entity_id": presc.customer_id} for presc in due] + [{"type": "LOW_STOCK", "severity": "warning", "title": f"{product.name} kam qoldi", "message": f"Qoldiq: {product.stock}, minimum: {product.minimum_stock}", "entity_id": product.id} for product in low])
     return ok(result)
 
@@ -524,7 +584,7 @@ def notifications(db: Session = Depends(get_db), _: User = Depends(current_user)
 @app.get("/api/v1/users")
 def list_users(db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER"))) -> dict:
     rows = db.scalars(select(User).order_by(User.id))
-    return ok([{**user_data(row), "active": row.active} for row in rows])
+    return ok([{**user_data(db, row), "active": row.active} for row in rows])
 
 
 @app.post("/api/v1/users", status_code=status.HTTP_201_CREATED)
@@ -534,7 +594,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), _: User = De
         raise HTTPException(409, "Bu login avval mavjud")
     user = User(username=username, password_hash=password_hash.hash(payload.password), role=payload.role)
     db.add(user); db.flush(); audit(db, _, "CREATE", "USER", user.id, f"Xodim yaratildi: {user.username}"); db.commit(); db.refresh(user)
-    return ok({**user_data(user), "active": user.active})
+    return ok({**user_data(db, user), "active": user.active})
 
 
 @app.get("/api/v1/branches")
@@ -562,13 +622,16 @@ def add_branch_member(branch_id: int, payload: UserBranchAssign, db: Session = D
     if db.scalar(select(UserBranch).where(UserBranch.branch_id == branch.id, UserBranch.user_id == member.id)):
         raise HTTPException(409, "Xodim bu filialga allaqachon biriktirilgan")
     db.add(UserBranch(branch=branch, user=member)); audit(db, user, "ASSIGN", "BRANCH", branch.id, f"{member.username} filialga biriktirildi"); db.commit()
-    return ok({"branch_id": branch.id, "user": user_data(member)})
+    return ok({"branch_id": branch.id, "user": user_data(db, member)})
 
 
 @app.get("/api/v1/repairs")
 def list_repairs(db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
-    rows = db.scalars(select(RepairOrder).options(joinedload(RepairOrder.customer)).order_by(RepairOrder.id.desc()))
-    return ok([repair_data(row) for row in rows])
+    query = select(RepairOrder).options(joinedload(RepairOrder.customer)).order_by(RepairOrder.id.desc())
+    bid = read_branch_id(db, _)
+    if bid is not None:
+        query = query.where(RepairOrder.branch_id == bid)
+    return ok([repair_data(row) for row in db.scalars(query)])
 
 
 @app.post("/api/v1/repairs", status_code=status.HTTP_201_CREATED)
@@ -576,12 +639,13 @@ def create_repair(payload: RepairOrderCreate, db: Session = Depends(get_db), _: 
     customer = db.get(Customer, payload.customer_id)
     if not customer:
         raise HTTPException(404, "Mijoz topilmadi")
+    ensure_branch(read_branch_id(db, _), customer.branch_id, "Mijoz topilmadi")
     if payload.paid > payload.estimated_cost:
         raise HTTPException(422, "Avans xizmat qiymatidan katta")
-    repair = RepairOrder(customer=customer, device=payload.device.strip(), issue=payload.issue.strip(), estimated_cost=payload.estimated_cost, paid=payload.paid, due_date=payload.due_date)
+    repair = RepairOrder(customer=customer, device=payload.device.strip(), issue=payload.issue.strip(), estimated_cost=payload.estimated_cost, paid=payload.paid, due_date=payload.due_date, branch_id=customer.branch_id)
     db.add(repair); db.flush()
     if repair.paid:
-        if shift := open_shift(db):
+        if shift := open_shift(db, repair.branch_id):
             db.add(CashMovement(cash_shift_id=shift.id, movement_type="REPAIR_PAYMENT", amount=repair.paid, reference_type="REPAIR", reference_id=repair.id, note=f"Ta'mir #{repair.id}"))
     customer.debt += repair.estimated_cost - repair.paid
     audit(db, _, "CREATE", "REPAIR", repair.id, f"Ta'mir qabul qilindi: {repair.device}")
@@ -594,6 +658,7 @@ def update_repair_status(repair_id: int, payload: RepairOrderUpdate, db: Session
     repair = db.scalar(select(RepairOrder).options(joinedload(RepairOrder.customer)).where(RepairOrder.id == repair_id))
     if not repair:
         raise HTTPException(404, "Ta'mirlash buyurtmasi topilmadi")
+    ensure_branch(read_branch_id(db, _), repair.branch_id, "Ta'mirlash buyurtmasi topilmadi")
     if repair.status in {"DELIVERED", "CANCELLED"}:
         raise HTTPException(409, "Yopilgan buyurtma o'zgartirilmaydi")
     repair.status = payload.status
@@ -608,8 +673,11 @@ def update_repair_status(repair_id: int, payload: RepairOrderUpdate, db: Session
 
 @app.get("/api/v1/optical-cases")
 def list_optical_cases(db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
-    rows = db.scalars(select(OpticalCase).options(joinedload(OpticalCase.customer), joinedload(OpticalCase.frame_product)).order_by(OpticalCase.id.desc()))
-    return ok([optical_case_data(db, item) for item in rows])
+    query = select(OpticalCase).options(joinedload(OpticalCase.customer), joinedload(OpticalCase.frame_product)).order_by(OpticalCase.id.desc())
+    bid = read_branch_id(db, _)
+    if bid is not None:
+        query = query.where(OpticalCase.branch_id == bid)
+    return ok([optical_case_data(db, item) for item in db.scalars(query)])
 
 
 @app.post("/api/v1/optical-cases", status_code=status.HTTP_201_CREATED)
@@ -617,22 +685,27 @@ def create_optical_case(payload: OpticalCaseCreate, db: Session = Depends(get_db
     customer = db.get(Customer, payload.customer_id)
     if not customer:
         raise HTTPException(404, "Mijoz topilmadi")
+    bid = read_branch_id(db, user)
+    ensure_branch(bid, customer.branch_id, "Mijoz topilmadi")
     frame = db.get(Product, payload.frame_product_id) if payload.frame_product_id else None
     if payload.frame_product_id and not frame:
         raise HTTPException(404, "Ramka topilmadi")
+    if frame:
+        ensure_branch(bid, frame.branch_id, "Ramka topilmadi")
     if frame and frame.category != "FRAME":
         raise HTTPException(422, "Optik karta uchun faqat rama tanlanadi")
-    item = OpticalCase(customer=customer, frame_product=frame, chief_complaint=payload.chief_complaint, created_by_id=user.id, status="FRAME_SELECTED" if frame else "INTAKE")
+    item = OpticalCase(customer=customer, frame_product=frame, chief_complaint=payload.chief_complaint, created_by_id=user.id, status="FRAME_SELECTED" if frame else "INTAKE", branch_id=customer.branch_id)
     db.add(item); db.flush(); audit(db, user, "CREATE", "OPTICAL_CASE", item.id, "Professional optik karta yaratildi"); db.commit(); db.refresh(item)
     db.refresh(item, attribute_names=["customer", "frame_product"])
     return ok(optical_case_data(db, item))
 
 
 @app.post("/api/v1/optical-cases/{case_id}/exam")
-def save_eye_exam(case_id: int, payload: EyeExamCreate, db: Session = Depends(get_db), user: User = Depends(require_roles("OWNER", "MANAGER", "OPTOMETRIST"))) -> dict:
+def save_eye_exam(case_id: int, payload: EyeExamCreate, db: Session = Depends(get_db), user: User = Depends(require_roles("OWNER", "MANAGER", "OPTOMETRIST", "SELLER"))) -> dict:
     item = db.scalar(select(OpticalCase).options(joinedload(OpticalCase.customer), joinedload(OpticalCase.frame_product)).where(OpticalCase.id == case_id))
     if not item:
         raise HTTPException(404, "Optik karta topilmadi")
+    ensure_branch(read_branch_id(db, user), item.branch_id, "Optik karta topilmadi")
     exam = db.scalar(select(EyeExam).where(EyeExam.optical_case_id == case_id))
     if exam:
         for field, value in payload.model_dump().items():
@@ -651,6 +724,7 @@ def save_centration(case_id: int, payload: CentrationCreate, db: Session = Depen
     item = db.scalar(select(OpticalCase).options(joinedload(OpticalCase.customer), joinedload(OpticalCase.frame_product)).where(OpticalCase.id == case_id))
     if not item:
         raise HTTPException(404, "Optik karta topilmadi")
+    ensure_branch(read_branch_id(db, user), item.branch_id, "Optik karta topilmadi")
     if not item.frame_product_id:
         raise HTTPException(422, "Centrationdan oldin rama tanlanishi kerak")
     if not db.scalar(select(EyeExam).where(EyeExam.optical_case_id == case_id)):
@@ -671,6 +745,7 @@ def save_lens_configuration(case_id: int, payload: LensConfigurationCreate, db: 
     item = db.scalar(select(OpticalCase).options(joinedload(OpticalCase.customer), joinedload(OpticalCase.frame_product)).where(OpticalCase.id == case_id))
     if not item:
         raise HTTPException(404, "Optik karta topilmadi")
+    ensure_branch(read_branch_id(db, user), item.branch_id, "Optik karta topilmadi")
     if not db.scalar(select(Centration).where(Centration.optical_case_id == case_id)):
         raise HTTPException(422, "Linza konfiguratsiyasidan oldin centration kerak")
     row = db.scalar(select(LensConfiguration).where(LensConfiguration.optical_case_id == case_id))
@@ -685,10 +760,11 @@ def save_lens_configuration(case_id: int, payload: LensConfigurationCreate, db: 
 
 
 @app.post("/api/v1/optical-cases/{case_id}/lab")
-def create_lab_job(case_id: int, payload: LabJobCreate, db: Session = Depends(get_db), user: User = Depends(require_roles("OWNER", "MANAGER", "LAB_QC"))) -> dict:
+def create_lab_job(case_id: int, payload: LabJobCreate, db: Session = Depends(get_db), user: User = Depends(require_roles("OWNER", "MANAGER", "LAB_QC", "SELLER"))) -> dict:
     item = db.scalar(select(OpticalCase).options(joinedload(OpticalCase.customer), joinedload(OpticalCase.frame_product)).where(OpticalCase.id == case_id))
     if not item:
         raise HTTPException(404, "Optik karta topilmadi")
+    ensure_branch(read_branch_id(db, user), item.branch_id, "Optik karta topilmadi")
     if not db.scalar(select(LensConfiguration).where(LensConfiguration.optical_case_id == case_id)):
         raise HTTPException(422, "Laboratoriyaga yuborishdan oldin linza konfiguratsiyasi kerak")
     if db.scalar(select(LabJob).where(LabJob.optical_case_id == case_id)):
@@ -699,11 +775,12 @@ def create_lab_job(case_id: int, payload: LabJobCreate, db: Session = Depends(ge
 
 
 @app.post("/api/v1/optical-cases/{case_id}/lab/status")
-def update_lab_job(case_id: int, payload: LabJobUpdate, db: Session = Depends(get_db), user: User = Depends(require_roles("OWNER", "MANAGER", "LAB_QC"))) -> dict:
+def update_lab_job(case_id: int, payload: LabJobUpdate, db: Session = Depends(get_db), user: User = Depends(require_roles("OWNER", "MANAGER", "LAB_QC", "SELLER"))) -> dict:
     item = db.scalar(select(OpticalCase).options(joinedload(OpticalCase.customer), joinedload(OpticalCase.frame_product)).where(OpticalCase.id == case_id))
     job = db.scalar(select(LabJob).where(LabJob.optical_case_id == case_id))
     if not item or not job:
         raise HTTPException(404, "Laboratoriya ishi topilmadi")
+    ensure_branch(read_branch_id(db, user), item.branch_id, "Laboratoriya ishi topilmadi")
     job.status = payload.status; job.qc_note = payload.qc_note
     if payload.status in {"RECEIVED", "QC_PASSED", "QC_FAILED", "READY"}:
         job.received_at = datetime.utcnow()
@@ -719,6 +796,7 @@ def create_telegram_link(customer_id: int, db: Session = Depends(get_db), _: Use
     customer = db.get(Customer, customer_id)
     if not customer:
         raise HTTPException(404, "Mijoz topilmadi")
+    ensure_branch(read_branch_id(db, _), customer.branch_id, "Mijoz topilmadi")
     if not settings.telegram_bot_username:
         raise HTTPException(503, "Telegram bot username sozlanmagan")
     token = secrets.token_urlsafe(18).replace("-", "_")
@@ -732,6 +810,7 @@ def optical_advice(customer_id: int, db: Session = Depends(get_db), _: User = De
     customer = db.get(Customer, customer_id)
     if not customer:
         raise HTTPException(404, "Mijoz topilmadi")
+    ensure_branch(read_branch_id(db, _), customer.branch_id, "Mijoz topilmadi")
     prescription = db.scalar(select(Prescription).where(Prescription.customer_id == customer_id).order_by(Prescription.created_at.desc()))
     if not prescription:
         return ok({"customer": customer_data(customer), "has_prescription": False, "recommendations": ["Avval retsept ma'lumotlarini kiriting."], "warning": "Tavsiyalar shifokor retseptini almashtirmaydi."})
@@ -759,6 +838,9 @@ def optical_advice(customer_id: int, db: Session = Depends(get_db), _: User = De
 @app.get("/api/v1/customers")
 def list_customers(q: str = "", db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
     query = select(Customer).order_by(Customer.id.desc())
+    bid = read_branch_id(db, _)
+    if bid is not None:
+        query = query.where(Customer.branch_id == bid)
     if q:
         query = query.where(Customer.name.ilike(f"%{q}%") | Customer.phone.ilike(f"%{q}%"))
     return ok([customer_data(c) for c in db.scalars(query)])
@@ -767,9 +849,13 @@ def list_customers(q: str = "", db: Session = Depends(get_db), _: User = Depends
 @app.post("/api/v1/customers", status_code=status.HTTP_201_CREATED)
 def create_customer(payload: CustomerCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
     normalized = "".join(char for char in payload.phone if char.isdigit() or char == "+")
-    if db.scalar(select(Customer).where(Customer.phone == normalized)):
+    bid = write_branch_id(db, _, payload.branch_id)
+    if bid is None:
+        raise HTTPException(400, "Mijoz uchun filial tanlang")
+    branch_cond = Customer.branch_id == bid
+    if db.scalar(select(Customer).where(Customer.phone == normalized, branch_cond)):
         raise HTTPException(409, "Bu telefon raqami avval mavjud")
-    customer = Customer(name=payload.name.strip(), phone=normalized)
+    customer = Customer(name=payload.name.strip(), phone=normalized, branch_id=bid)
     db.add(customer); db.flush(); audit(db, _, "CREATE", "CUSTOMER", customer.id, f"Mijoz yaratildi: {customer.name}"); db.commit(); db.refresh(customer)
     return ok(customer_data(customer))
 
@@ -779,12 +865,13 @@ def pay_customer_debt(customer_id: int, payload: CustomerPaymentCreate, db: Sess
     customer = db.get(Customer, customer_id)
     if not customer:
         raise HTTPException(404, "Mijoz topilmadi")
+    ensure_branch(read_branch_id(db, _), customer.branch_id, "Mijoz topilmadi")
     if payload.amount > customer.debt:
         raise HTTPException(422, "Tolov mijoz qarzidan katta")
     payment = CustomerPayment(customer=customer, amount=payload.amount, comment=payload.comment)
     db.add(payment); db.flush()
     customer.debt -= payment.amount
-    if shift := open_shift(db):
+    if shift := open_shift(db, customer.branch_id):
         db.add(CashMovement(cash_shift_id=shift.id, movement_type="CUSTOMER_DEBT_PAYMENT", amount=payment.amount, reference_type="CUSTOMER_PAYMENT", reference_id=payment.id, note=payload.comment))
     audit(db, _, "PAY", "CUSTOMER", customer.id, f"Mijozdan qarz tolov: {payment.amount} som")
     db.commit(); db.refresh(payment)
@@ -793,16 +880,20 @@ def pay_customer_debt(customer_id: int, payload: CustomerPaymentCreate, db: Sess
 
 @app.get("/api/v1/customers/{customer_id}/prescriptions")
 def list_prescriptions(customer_id: int, db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
-    if not db.get(Customer, customer_id):
+    customer = db.get(Customer, customer_id)
+    if not customer:
         raise HTTPException(404, "Mijoz topilmadi")
+    ensure_branch(read_branch_id(db, _), customer.branch_id, "Mijoz topilmadi")
     prescriptions = db.scalars(select(Prescription).where(Prescription.customer_id == customer_id).order_by(Prescription.created_at.desc()))
     return ok([prescription_data(prescription) for prescription in prescriptions])
 
 
 @app.post("/api/v1/customers/{customer_id}/prescriptions", status_code=status.HTTP_201_CREATED)
-def create_prescription(customer_id: int, payload: PrescriptionCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "OPTOMETRIST"))) -> dict:
-    if not db.get(Customer, customer_id):
+def create_prescription(customer_id: int, payload: PrescriptionCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "OPTOMETRIST", "SELLER"))) -> dict:
+    customer = db.get(Customer, customer_id)
+    if not customer:
         raise HTTPException(404, "Mijoz topilmadi")
+    ensure_branch(read_branch_id(db, _), customer.branch_id, "Mijoz topilmadi")
     prescription = Prescription(customer_id=customer_id, **payload.model_dump())
     db.add(prescription); db.flush(); audit(db, _, "CREATE", "PRESCRIPTION", prescription.id, f"Mijoz #{customer_id} uchun retsept yaratildi"); db.commit(); db.refresh(prescription)
     return ok(prescription_data(prescription))
@@ -811,6 +902,9 @@ def create_prescription(customer_id: int, payload: PrescriptionCreate, db: Sessi
 @app.get("/api/v1/products")
 def list_products(q: str = "", low_stock: bool = False, db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
     query = select(Product).order_by(Product.name)
+    bid = read_branch_id(db, _)
+    if bid is not None:
+        query = query.where(Product.branch_id == bid)
     if q:
         query = query.where(Product.name.ilike(f"%{q}%") | Product.brand.ilike(f"%{q}%"))
     if low_stock:
@@ -819,17 +913,21 @@ def list_products(q: str = "", low_stock: bool = False, db: Session = Depends(ge
 
 
 @app.post("/api/v1/products", status_code=status.HTTP_201_CREATED)
-def create_product(payload: ProductCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER"))) -> dict:
-    product = Product(**payload.model_dump())
+def create_product(payload: ProductCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
+    bid = write_branch_id(db, _, payload.branch_id)
+    if bid is None:
+        raise HTTPException(400, "Mahsulot uchun filial tanlang")
+    product = Product(**payload.model_dump(exclude={"branch_id"}), branch_id=bid)
     db.add(product); db.flush(); audit(db, _, "CREATE", "PRODUCT", product.id, f"Mahsulot yaratildi: {product.name}"); db.commit(); db.refresh(product)
     return ok(product_data(product))
 
 
 @app.post("/api/v1/inventory/{product_id}/receive")
-def receive_stock(product_id: int, payload: StockReceive, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER"))) -> dict:
+def receive_stock(product_id: int, payload: StockReceive, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
     product = db.get(Product, product_id)
     if not product:
         raise HTTPException(404, "Mahsulot topilmadi")
+    ensure_branch(read_branch_id(db, _), product.branch_id, "Mahsulot topilmadi")
     product.stock += payload.quantity
     stock_movement(db, product, payload.quantity, "MANUAL_RECEIVE", "INVENTORY", product.id, "Omborga kirim")
     audit(db, _, "RECEIVE_STOCK", "PRODUCT", product.id, f"{payload.quantity} dona kirim qilindi")
@@ -839,8 +937,11 @@ def receive_stock(product_id: int, payload: StockReceive, db: Session = Depends(
 
 @app.get("/api/v1/orders")
 def list_orders(db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
-    rows = db.scalars(select(Order).options(joinedload(Order.customer), joinedload(Order.product)).order_by(Order.id.desc()))
-    return ok([order_data(order) for order in rows])
+    query = select(Order).options(joinedload(Order.customer), joinedload(Order.product)).order_by(Order.id.desc())
+    bid = read_branch_id(db, _)
+    if bid is not None:
+        query = query.where(Order.branch_id == bid)
+    return ok([order_data(order) for order in db.scalars(query)])
 
 
 @app.post("/api/v1/orders", status_code=status.HTTP_201_CREATED)
@@ -848,17 +949,22 @@ def create_order(payload: OrderCreate, db: Session = Depends(get_db), _: User = 
     customer = db.get(Customer, payload.customer_id)
     if not customer:
         raise HTTPException(404, "Mijoz topilmadi")
+    bid = read_branch_id(db, _)
+    ensure_branch(bid, customer.branch_id, "Mijoz topilmadi")
     if payload.product_id is not None:
         product = db.get(Product, payload.product_id)
         if not product:
             raise HTTPException(404, "Mahsulot topilmadi")
+        ensure_branch(bid, product.branch_id, "Mahsulot topilmadi")
+        if product.branch_id != customer.branch_id:
+            raise HTTPException(422, "Mahsulot boshqa filialga tegishli")
         if product.stock < 1:
             raise HTTPException(409, "Omborda mahsulot qolmagan")
         if payload.paid > product.sale_price:
             raise HTTPException(422, "Avans umumiy summadan katta bo'lishi mumkin emas")
         product.stock -= 1
         customer.debt += product.sale_price - payload.paid
-        order = Order(customer=customer, product=product, item_name=product.name, total=product.sale_price, paid=payload.paid, status="CONFIRMED")
+        order = Order(customer=customer, product=product, item_name=product.name, total=product.sale_price, paid=payload.paid, status="CONFIRMED", branch_id=customer.branch_id)
         db.add(order); db.flush(); stock_movement(db, product, -1, "ORDER_RESERVE", "ORDER", order.id, "Buyurtma uchun rezerv"); audit(db, _, "CREATE", "ORDER", order.id, f"Buyurtma yaratildi: {product.name}"); db.commit(); db.refresh(order)
         db.refresh(order, attribute_names=["customer", "product"])
         notify_order_created(db, order, product.name)
@@ -870,7 +976,7 @@ def create_order(payload: OrderCreate, db: Session = Depends(get_db), _: User = 
     if payload.paid > total:
         raise HTTPException(422, "Avans umumiy summadan katta bo'lishi mumkin emas")
     customer.debt += total - payload.paid
-    order = Order(customer=customer, product=None, item_name=item_name, total=total, paid=payload.paid, status="CONFIRMED")
+    order = Order(customer=customer, product=None, item_name=item_name, total=total, paid=payload.paid, status="CONFIRMED", branch_id=customer.branch_id)
     db.add(order); db.flush(); audit(db, _, "CREATE", "ORDER", order.id, f"Qo'lda buyurtma yaratildi: {item_name}"); db.commit(); db.refresh(order)
     db.refresh(order, attribute_names=["customer"])
     notify_order_created(db, order, item_name)
@@ -882,6 +988,7 @@ def advance_order(order_id: int, db: Session = Depends(get_db), _: User = Depend
     order = db.scalar(select(Order).options(joinedload(Order.customer), joinedload(Order.product)).where(Order.id == order_id))
     if not order:
         raise HTTPException(404, "Buyurtma topilmadi")
+    ensure_branch(read_branch_id(db, _), order.branch_id, "Buyurtma topilmadi")
     transitions = {"CONFIRMED": "IN_PROGRESS", "IN_PROGRESS": "READY", "READY": "DELIVERED"}
     if order.status not in transitions:
         raise HTTPException(409, "Buyurtma allaqachon yopilgan")
@@ -894,10 +1001,11 @@ def advance_order(order_id: int, db: Session = Depends(get_db), _: User = Depend
 
 
 @app.post("/api/v1/orders/{order_id}/cancel")
-def cancel_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER"))) -> dict:
+def cancel_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
     order = db.scalar(select(Order).options(joinedload(Order.customer), joinedload(Order.product)).where(Order.id == order_id))
     if not order:
         raise HTTPException(404, "Buyurtma topilmadi")
+    ensure_branch(read_branch_id(db, _), order.branch_id, "Buyurtma topilmadi")
     if order.status in {"DELIVERED", "CANCELLED"}:
         raise HTTPException(409, "Bu buyurtmani bekor qilib bolmaydi")
     order.status = "CANCELLED"
@@ -913,12 +1021,16 @@ def cancel_order(order_id: int, db: Session = Depends(get_db), _: User = Depends
 @app.post("/api/v1/sales", status_code=status.HTTP_201_CREATED)
 def create_sale(payload: SaleCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
     customer = db.get(Customer, payload.customer_id) if payload.customer_id else None
+    bid = read_branch_id(db, _)
+    if customer:
+        ensure_branch(bid, customer.branch_id, "Mijoz topilmadi")
     items: list[tuple[Product, int]] = []
     total = 0
     for line in payload.items:
         product = db.get(Product, line.product_id)
         if not product:
             raise HTTPException(404, f"Mahsulot #{line.product_id} topilmadi")
+        ensure_branch(bid, product.branch_id, f"Mahsulot #{line.product_id} topilmadi")
         if product.stock < line.quantity:
             raise HTTPException(409, f"{product.name}: qoldiq yetarli emas")
         items.append((product, line.quantity)); total += product.sale_price * line.quantity
@@ -926,7 +1038,12 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db), _: User = De
         raise HTTPException(422, "To'lov umumiy summadan katta")
     if payload.paid < total and not customer:
         raise HTTPException(422, "Qarzli savat uchun mijoz tanlang")
-    sale = Sale(customer=customer, total=total, paid=payload.paid, payment_method=payload.payment_method)
+    if len({product.branch_id for product, _quantity in items}) > 1:
+        raise HTTPException(422, "Bitta sotuvda faqat bitta filial mahsulotlari bo'ladi")
+    sale_branch = bid if bid is not None else (items[0][0].branch_id if items else (customer.branch_id if customer else None))
+    if customer and customer.branch_id is not None and sale_branch is not None and customer.branch_id != sale_branch:
+        raise HTTPException(422, "Mijoz boshqa filialga tegishli")
+    sale = Sale(customer=customer, total=total, paid=payload.paid, payment_method=payload.payment_method, branch_id=sale_branch)
     db.add(sale)
     db.flush()
     for product, quantity in items:
@@ -935,7 +1052,7 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db), _: User = De
         stock_movement(db, product, -quantity, "SALE", "SALE", sale.id, "POS savdo")
     if customer:
         customer.debt += total - payload.paid
-    if shift := open_shift(db):
+    if shift := open_shift(db, sale_branch):
         db.add(CashMovement(cash_shift_id=shift.id, movement_type="SALE_PAYMENT", amount=payload.paid, reference_type="SALE", reference_id=sale.id, note=f"Sotuv #{sale.id}"))
     db.flush(); audit(db, _, "CREATE", "SALE", sale.id, f"Sotuv: {total} som, tolov: {payload.paid} som"); db.commit(); db.refresh(sale)
     return ok({"id": sale.id, "total": sale.total, "paid": sale.paid, "balance": sale.total - sale.paid, "created_at": sale.created_at})
@@ -943,15 +1060,20 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db), _: User = De
 
 @app.get("/api/v1/sales")
 def list_sales(limit: int = 100, db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
-    rows = db.scalars(select(Sale).options(joinedload(Sale.customer), joinedload(Sale.items).joinedload(SaleItem.product)).order_by(Sale.id.desc()).limit(min(limit, 200))).unique()
+    query = select(Sale).options(joinedload(Sale.customer), joinedload(Sale.items).joinedload(SaleItem.product)).order_by(Sale.id.desc())
+    bid = read_branch_id(db, _)
+    if bid is not None:
+        query = query.where(Sale.branch_id == bid)
+    rows = db.scalars(query.limit(min(limit, 200))).unique()
     return ok([{"id": sale.id, "customer": customer_data(sale.customer) if sale.customer else None, "total": sale.total, "paid": sale.paid, "balance": sale.total - sale.paid, "payment_method": sale.payment_method, "created_at": sale.created_at, "items": [{"product": product_data(item.product), "quantity": item.quantity, "unit_price": item.unit_price} for item in sale.items]} for sale in rows])
 
 
 @app.post("/api/v1/sales/{sale_id}/return", status_code=status.HTTP_201_CREATED)
-def return_sale_item(sale_id: int, payload: SaleReturnCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER"))) -> dict:
+def return_sale_item(sale_id: int, payload: SaleReturnCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
     sale = db.scalar(select(Sale).options(joinedload(Sale.customer), joinedload(Sale.items)).where(Sale.id == sale_id))
     if not sale:
         raise HTTPException(404, "Sotuv topilmadi")
+    ensure_branch(read_branch_id(db, _), sale.branch_id, "Sotuv topilmadi")
     sale_item = next((item for item in sale.items if item.product_id == payload.product_id), None)
     if not sale_item:
         raise HTTPException(404, "Bu mahsulot ushbu sotuvda mavjud emas")
@@ -969,7 +1091,7 @@ def return_sale_item(sale_id: int, payload: SaleReturnCreate, db: Session = Depe
         stock_movement(db, product, 0, "DAMAGE", "SALE_RETURN", sale_return.id, payload.reason)
     if sale.customer:
         sale.customer.debt = max(0, sale.customer.debt - amount)
-    if shift := open_shift(db):
+    if shift := open_shift(db, sale.branch_id):
         db.add(CashMovement(cash_shift_id=shift.id, movement_type="REFUND", amount=-amount, reference_type="SALE_RETURN", reference_id=sale_return.id, note=payload.reason))
     audit(db, _, "RETURN", "SALE", sale.id, f"{payload.quantity} dona qaytarildi: {amount} som")
     db.commit(); db.refresh(sale_return)
@@ -982,7 +1104,7 @@ def list_suppliers(db: Session = Depends(get_db), _: User = Depends(current_user
 
 
 @app.post("/api/v1/suppliers", status_code=status.HTTP_201_CREATED)
-def create_supplier(payload: SupplierCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER"))) -> dict:
+def create_supplier(payload: SupplierCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
     if db.scalar(select(Supplier).where(Supplier.name == payload.name.strip())):
         raise HTTPException(409, "Bu supplier avval mavjud")
     supplier = Supplier(name=payload.name.strip(), phone=payload.phone)
@@ -991,7 +1113,7 @@ def create_supplier(payload: SupplierCreate, db: Session = Depends(get_db), _: U
 
 
 @app.post("/api/v1/suppliers/{supplier_id}/payments", status_code=status.HTTP_201_CREATED)
-def pay_supplier(supplier_id: int, payload: SupplierPaymentCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER"))) -> dict:
+def pay_supplier(supplier_id: int, payload: SupplierPaymentCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
     supplier = db.get(Supplier, supplier_id)
     if not supplier:
         raise HTTPException(404, "Supplier topilmadi")
@@ -1000,7 +1122,7 @@ def pay_supplier(supplier_id: int, payload: SupplierPaymentCreate, db: Session =
     payment = SupplierPayment(supplier=supplier, amount=payload.amount, comment=payload.comment)
     db.add(payment); db.flush()
     supplier.balance -= payment.amount
-    if shift := open_shift(db):
+    if shift := open_shift(db, write_branch_id(db, _)):
         db.add(CashMovement(cash_shift_id=shift.id, movement_type="SUPPLIER_PAYMENT", amount=-payment.amount, reference_type="SUPPLIER_PAYMENT", reference_id=payment.id, note=payload.comment))
     audit(db, _, "PAY", "SUPPLIER", supplier.id, f"Supplierga tolov: {payment.amount} som")
     db.commit(); db.refresh(payment)
@@ -1008,17 +1130,21 @@ def pay_supplier(supplier_id: int, payload: SupplierPaymentCreate, db: Session =
 
 
 @app.post("/api/v1/purchases", status_code=status.HTTP_201_CREATED)
-def create_purchase(payload: PurchaseCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER"))) -> dict:
+def create_purchase(payload: PurchaseCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
     supplier = db.get(Supplier, payload.supplier_id)
     if not supplier:
         raise HTTPException(404, "Supplier topilmadi")
+    bid = read_branch_id(db, _)
     rows: list[tuple[Product, int, int]] = []
     total = 0
     for line in payload.items:
         product = db.get(Product, line.product_id)
         if not product:
             raise HTTPException(404, f"Mahsulot #{line.product_id} topilmadi")
+        ensure_branch(bid, product.branch_id, f"Mahsulot #{line.product_id} topilmadi")
         rows.append((product, line.quantity, line.unit_cost)); total += line.quantity * line.unit_cost
+    if len({product.branch_id for product, _quantity, _cost in rows}) > 1:
+        raise HTTPException(422, "Bitta kirimda faqat bitta filial mahsulotlari bo'ladi")
     if payload.paid > total:
         raise HTTPException(422, "Tolov umumiy kirim summasidan katta")
     purchase = Purchase(supplier=supplier, total=total, paid=payload.paid, invoice_no=payload.invoice_no)
@@ -1029,7 +1155,7 @@ def create_purchase(payload: PurchaseCreate, db: Session = Depends(get_db), _: U
         purchase.items.append(PurchaseItem(product=product, quantity=quantity, unit_cost=cost))
         stock_movement(db, product, quantity, "PURCHASE", "PURCHASE", purchase.id, "Supplierdan kirim")
     supplier.balance += total - payload.paid
-    if payload.paid and (shift := open_shift(db)):
+    if payload.paid and (shift := open_shift(db, rows[0][0].branch_id if rows else None)):
         db.add(CashMovement(cash_shift_id=shift.id, movement_type="SUPPLIER_PAYMENT", amount=-payload.paid, reference_type="PURCHASE", reference_id=purchase.id, note=f"Kirim #{purchase.id}"))
     audit(db, _, "CREATE", "PURCHASE", purchase.id, f"Supplierdan kirim: {total} som")
     db.commit(); db.refresh(purchase)
@@ -1038,20 +1164,31 @@ def create_purchase(payload: PurchaseCreate, db: Session = Depends(get_db), _: U
 
 @app.get("/api/v1/purchases")
 def list_purchases(db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
-    rows = db.scalars(select(Purchase).options(joinedload(Purchase.supplier)).order_by(Purchase.id.desc()))
+    query = select(Purchase).options(joinedload(Purchase.supplier)).order_by(Purchase.id.desc())
+    bid = read_branch_id(db, _)
+    if bid is not None:
+        query = query.where(select(PurchaseItem).join(Product, PurchaseItem.product_id == Product.id).where(PurchaseItem.purchase_id == Purchase.id, Product.branch_id == bid).exists())
+    rows = db.scalars(query)
     return ok([{"id": row.id, "supplier": supplier_data(row.supplier), "total": row.total, "paid": row.paid, "balance": row.total - row.paid, "invoice_no": row.invoice_no, "created_at": row.created_at} for row in rows])
 
 
 @app.get("/api/v1/expenses")
 def list_expenses(limit: int = 100, db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
-    rows = db.scalars(select(Expense).order_by(Expense.created_at.desc()).limit(min(limit, 200)))
+    query = select(Expense).order_by(Expense.created_at.desc())
+    bid = read_branch_id(db, _)
+    if bid is not None:
+        query = query.where(Expense.branch_id == bid)
+    rows = db.scalars(query.limit(min(limit, 200)))
     return ok([{"id": row.id, "category": row.category, "amount": row.amount, "description": row.description, "cash_shift_id": row.cash_shift_id, "created_at": row.created_at} for row in rows])
 
 
 @app.post("/api/v1/expenses", status_code=status.HTTP_201_CREATED)
-def create_expense(payload: ExpenseCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER"))) -> dict:
-    shift = open_shift(db)
-    expense = Expense(category=payload.category.strip(), amount=payload.amount, description=payload.description, cash_shift_id=shift.id if shift else None)
+def create_expense(payload: ExpenseCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
+    bid = write_branch_id(db, _, payload.branch_id)
+    if bid is None:
+        raise HTTPException(400, "Xarajat uchun filial tanlang")
+    shift = open_shift(db, bid)
+    expense = Expense(category=payload.category.strip(), amount=payload.amount, description=payload.description, cash_shift_id=shift.id if shift else None, branch_id=bid)
     db.add(expense); db.flush()
     if shift:
         db.add(CashMovement(cash_shift_id=shift.id, movement_type="EXPENSE", amount=-expense.amount, reference_type="EXPENSE", reference_id=expense.id, note=expense.category))
@@ -1062,23 +1199,31 @@ def create_expense(payload: ExpenseCreate, db: Session = Depends(get_db), _: Use
 
 @app.get("/api/v1/inventory/{product_id}/movements")
 def list_stock_movements(product_id: int, limit: int = 100, db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
-    if not db.get(Product, product_id):
+    product = db.get(Product, product_id)
+    if not product:
         raise HTTPException(404, "Mahsulot topilmadi")
+    ensure_branch(read_branch_id(db, _), product.branch_id, "Mahsulot topilmadi")
     rows = db.scalars(select(StockMovement).where(StockMovement.product_id == product_id).order_by(StockMovement.created_at.desc()).limit(min(limit, 200)))
     return ok([{"id": row.id, "quantity": row.quantity, "movement_type": row.movement_type, "reference_type": row.reference_type, "reference_id": row.reference_id, "note": row.note, "created_at": row.created_at} for row in rows])
 
 
 @app.get("/api/v1/cash-shifts/current")
 def current_shift(db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
-    shift = open_shift(db)
+    bid = read_branch_id(db, _)
+    if bid == NO_BRANCH:
+        return ok(None)
+    shift = open_shift(db, bid if bid is not None else user_branch_id(db, _))
     return ok(cash_shift_data(shift) if shift else None)
 
 
 @app.post("/api/v1/cash-shifts/open", status_code=status.HTTP_201_CREATED)
 def open_cash_shift(payload: CashShiftOpen, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
-    if open_shift(db):
-        raise HTTPException(409, "Ochiq smena mavjud")
-    shift = CashShift(opening_amount=payload.opening_amount)
+    bid = write_branch_id(db, _, payload.branch_id)
+    if bid is None:
+        raise HTTPException(400, "Smena uchun filial tanlang")
+    if open_shift(db, bid):
+        raise HTTPException(409, "Bu filialda ochiq smena mavjud")
+    shift = CashShift(opening_amount=payload.opening_amount, branch_id=bid)
     db.add(shift); db.flush(); audit(db, _, "OPEN", "CASH_SHIFT", shift.id, f"Smena ochildi: {payload.opening_amount} som"); db.commit(); db.refresh(shift)
     return ok(cash_shift_data(shift))
 
@@ -1088,6 +1233,7 @@ def close_cash_shift(shift_id: int, payload: CashShiftClose, db: Session = Depen
     shift = db.get(CashShift, shift_id)
     if not shift or shift.status != "OPEN":
         raise HTTPException(404, "Ochiq smena topilmadi")
+    ensure_branch(read_branch_id(db, _), shift.branch_id, "Ochiq smena topilmadi")
     movements = db.scalar(select(func.coalesce(func.sum(CashMovement.amount), 0)).where(CashMovement.cash_shift_id == shift.id)) or 0
     shift.expected_amount = shift.opening_amount + movements
     shift.actual_amount = payload.actual_amount
@@ -1099,14 +1245,26 @@ def close_cash_shift(shift_id: int, payload: CashShiftClose, db: Session = Depen
 
 
 @app.get("/api/v1/reports/dashboard")
-def dashboard(db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER"))) -> dict:
-    revenue = db.scalar(select(func.coalesce(func.sum(Sale.paid), 0))) or 0
-    order_paid = db.scalar(select(func.coalesce(func.sum(Order.paid), 0))) or 0
-    debt = db.scalar(select(func.coalesce(func.sum(Customer.debt), 0))) or 0
-    low_stock = db.scalar(select(func.count(Product.id)).where(Product.stock <= Product.minimum_stock)) or 0
-    active_orders = db.scalar(select(func.count(Order.id)).where(Order.status != "DELIVERED")) or 0
+def dashboard(db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
+    bid = read_branch_id(db, _)
+    sale_q = select(func.coalesce(func.sum(Sale.paid), 0))
+    order_paid_q = select(func.coalesce(func.sum(Order.paid), 0))
+    debt_q = select(func.coalesce(func.sum(Customer.debt), 0))
+    low_q = select(func.count(Product.id)).where(Product.stock <= Product.minimum_stock)
+    active_q = select(func.count(Order.id)).where(Order.status != "DELIVERED")
+    if bid is not None:
+        sale_q = sale_q.where(Sale.branch_id == bid)
+        order_paid_q = order_paid_q.where(Order.branch_id == bid)
+        debt_q = debt_q.where(Customer.branch_id == bid)
+        low_q = low_q.where(Product.branch_id == bid)
+        active_q = active_q.where(Order.branch_id == bid)
+    revenue = db.scalar(sale_q) or 0
+    order_paid = db.scalar(order_paid_q) or 0
+    debt = db.scalar(debt_q) or 0
+    low_stock = db.scalar(low_q) or 0
+    active_orders = db.scalar(active_q) or 0
     supplier_debt = db.scalar(select(func.coalesce(func.sum(Supplier.balance), 0))) or 0
-    shift = open_shift(db)
+    shift = open_shift(db, bid if bid is not None else user_branch_id(db, _))
     cash_expected = None
     if shift:
         movements = db.scalar(select(func.coalesce(func.sum(CashMovement.amount), 0)).where(CashMovement.cash_shift_id == shift.id)) or 0
@@ -1115,15 +1273,31 @@ def dashboard(db: Session = Depends(get_db), _: User = Depends(require_roles("OW
 
 
 @app.get("/api/v1/reports/finance")
-def finance_report(db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER"))) -> dict:
-    sales_total = db.scalar(select(func.coalesce(func.sum(Sale.total), 0))) or 0
-    sales_paid = db.scalar(select(func.coalesce(func.sum(Sale.paid), 0))) or 0
-    orders_total = db.scalar(select(func.coalesce(func.sum(Order.total), 0)).where(Order.status != "CANCELLED")) or 0
-    orders_paid = db.scalar(select(func.coalesce(func.sum(Order.paid), 0)).where(Order.status != "CANCELLED")) or 0
-    expenses = db.scalar(select(func.coalesce(func.sum(Expense.amount), 0))) or 0
-    purchases = db.scalar(select(func.coalesce(func.sum(Purchase.total), 0))) or 0
+def finance_report(db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
+    bid = read_branch_id(db, _)
+    sales_total_q = select(func.coalesce(func.sum(Sale.total), 0))
+    sales_paid_q = select(func.coalesce(func.sum(Sale.paid), 0))
+    orders_total_q = select(func.coalesce(func.sum(Order.total), 0)).where(Order.status != "CANCELLED")
+    orders_paid_q = select(func.coalesce(func.sum(Order.paid), 0)).where(Order.status != "CANCELLED")
+    expenses_q = select(func.coalesce(func.sum(Expense.amount), 0))
+    purchases_q = select(func.coalesce(func.sum(Purchase.total), 0))
+    customer_debt_q = select(func.coalesce(func.sum(Customer.debt), 0))
+    if bid is not None:
+        sales_total_q = sales_total_q.where(Sale.branch_id == bid)
+        sales_paid_q = sales_paid_q.where(Sale.branch_id == bid)
+        orders_total_q = orders_total_q.where(Order.branch_id == bid)
+        orders_paid_q = orders_paid_q.where(Order.branch_id == bid)
+        expenses_q = expenses_q.where(Expense.branch_id == bid)
+        purchases_q = purchases_q.where(select(PurchaseItem).join(Product, PurchaseItem.product_id == Product.id).where(PurchaseItem.purchase_id == Purchase.id, Product.branch_id == bid).exists())
+        customer_debt_q = customer_debt_q.where(Customer.branch_id == bid)
+    sales_total = db.scalar(sales_total_q) or 0
+    sales_paid = db.scalar(sales_paid_q) or 0
+    orders_total = db.scalar(orders_total_q) or 0
+    orders_paid = db.scalar(orders_paid_q) or 0
+    expenses = db.scalar(expenses_q) or 0
+    purchases = db.scalar(purchases_q) or 0
     supplier_debt = db.scalar(select(func.coalesce(func.sum(Supplier.balance), 0))) or 0
-    customer_debt = db.scalar(select(func.coalesce(func.sum(Customer.debt), 0))) or 0
+    customer_debt = db.scalar(customer_debt_q) or 0
     return ok({"sales_revenue": sales_total, "sales_paid": sales_paid, "order_value": orders_total, "order_paid": orders_paid, "expenses": expenses, "cash_in": sales_paid + orders_paid, "cash_out": expenses, "net_cash_flow": sales_paid + orders_paid - expenses, "purchase_value": purchases, "supplier_debt": supplier_debt, "customer_debt": customer_debt})
 
 
