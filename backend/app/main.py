@@ -30,7 +30,7 @@ from .schemas import BranchCreate, UserBranchAssign
 from .schemas import OpticalCaseCreate, EyeExamCreate, CentrationCreate, LensConfigurationCreate, LabJobCreate, LabJobUpdate
 from .database import Base, engine, get_db
 from .models import AuditLog, CashMovement, CashShift, Customer, CustomerPayment, Expense, Order, Prescription, Product, Purchase, PurchaseItem, Sale, SaleItem, SaleReturn, StockMovement, Supplier, SupplierPayment, User
-from .schemas import CashShiftClose, CashShiftOpen, CustomerCreate, CustomerPaymentCreate, ExpenseCreate, LoginInput, OrderCreate, PrescriptionCreate, ProductCreate, PurchaseCreate, SaleCreate, SaleReturnCreate, StockReceive, SupplierCreate, SupplierPaymentCreate
+from .schemas import CashShiftClose, CashShiftOpen, CustomerCreate, CustomerPaymentCreate, ExpenseCreate, LoginInput, OrderCancel, OrderCreate, PrescriptionCreate, ProductCreate, PurchaseCreate, SaleCreate, SaleReturnCreate, StockReceive, SupplierCreate, SupplierPaymentCreate
 
 truststore.inject_into_ssl()
 
@@ -1015,7 +1015,7 @@ def advance_order(order_id: int, db: Session = Depends(get_db), _: User = Depend
 
 
 @app.post("/api/v1/orders/{order_id}/cancel")
-def cancel_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
+def cancel_order(order_id: int, payload: OrderCancel | None = None, db: Session = Depends(get_db), _: User = Depends(require_roles("OWNER", "MANAGER", "SELLER"))) -> dict:
     order = db.scalar(select(Order).options(joinedload(Order.customer), joinedload(Order.product)).where(Order.id == order_id))
     if not order:
         raise HTTPException(404, "Buyurtma topilmadi")
@@ -1027,9 +1027,15 @@ def cancel_order(order_id: int, db: Session = Depends(get_db), _: User = Depends
     if order.product:
         order.product.stock += 1
         stock_movement(db, order.product, 1, "ORDER_CANCEL", "ORDER", order.id, "Bekor qilingan buyurtma rezervi qaytarildi")
-    audit(db, _, "CANCEL", "ORDER", order.id, "Buyurtma bekor qilindi")
+    refunded = 0
+    if payload and payload.refund_advance and order.paid:
+        refunded = order.paid
+        if shift := open_shift(db, order.branch_id):
+            db.add(CashMovement(cash_shift_id=shift.id, movement_type="ORDER_REFUND", amount=-refunded, reference_type="ORDER", reference_id=order.id, note=f"Buyurtma #{order.id} bekor — avans qaytarildi"))
+        order.paid = 0
+    audit(db, _, "CANCEL", "ORDER", order.id, f"Buyurtma bekor qilindi{f'; avans qaytarildi: {refunded} som' if refunded else ''}")
     db.commit(); db.refresh(order)
-    return ok(order_data(order))
+    return ok({**order_data(order), "refunded": refunded})
 
 
 @app.post("/api/v1/sales", status_code=status.HTTP_201_CREATED)

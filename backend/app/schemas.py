@@ -92,6 +92,10 @@ class StockReceive(BaseModel):
     quantity: int = Field(gt=0)
 
 
+class OrderCancel(BaseModel):
+    refund_advance: bool = False
+
+
 class OrderCreate(BaseModel):
     customer_id: int
     product_id: int | None = None
