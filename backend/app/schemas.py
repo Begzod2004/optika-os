@@ -129,6 +129,17 @@ class UserCreate(BaseModel):
     username: str = Field(min_length=3, max_length=80, pattern="^[a-zA-Z0-9_.-]+$")
     password: str = Field(min_length=6, max_length=128)
     role: str = Field(default="SELLER", pattern="^(OWNER|MANAGER|SELLER|OPTOMETRIST|LAB_QC)$")
+    full_name: str | None = Field(default=None, max_length=150)
+    phone: str | None = Field(default=None, max_length=30)
+
+
+class ProfileUpdate(BaseModel):
+    full_name: str | None = Field(default=None, max_length=150)
+    phone: str | None = Field(default=None, max_length=30)
+    telegram_username: str | None = Field(default=None, max_length=80)
+    photo: str | None = Field(default=None, max_length=200000)
+    current_password: str | None = Field(default=None, max_length=128)
+    new_password: str | None = Field(default=None, min_length=6, max_length=128)
 
 
 class OpticalCaseCreate(BaseModel):

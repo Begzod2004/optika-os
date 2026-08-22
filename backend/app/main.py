@@ -24,7 +24,7 @@ from .models import TelegramLink
 from .models import BackupRecord
 from .models import Branch, UserBranch
 from .models import OpticalCase, EyeExam, Centration, LensConfiguration, LabJob
-from .schemas import RepairOrderCreate, RepairOrderUpdate
+from .schemas import ProfileUpdate, RepairOrderCreate, RepairOrderUpdate
 from .schemas import UserCreate
 from .schemas import BranchCreate, UserBranchAssign
 from .schemas import OpticalCaseCreate, EyeExamCreate, CentrationCreate, LensConfigurationCreate, LabJobCreate, LabJobUpdate
@@ -83,7 +83,7 @@ def ok(data: object) -> dict:
 
 def user_data(db: Session, user: User) -> dict:
     branch = user_branch(db, user)
-    return {"id": user.id, "username": user.username, "role": user.role, "branch": {"id": branch.id, "name": branch.name} if branch else None}
+    return {"id": user.id, "username": user.username, "role": user.role, "full_name": user.full_name, "phone": user.phone, "telegram_username": user.telegram_username, "photo": user.photo, "branch": {"id": branch.id, "name": branch.name} if branch else None}
 
 
 def audit(db: Session, user: User | None, action: str, entity_type: str, entity_id: int | None, summary: str) -> None:
@@ -533,6 +533,27 @@ def me(db: Session = Depends(get_db), user: User = Depends(current_user)) -> dic
     return ok(user_data(db, user))
 
 
+@app.put("/api/v1/profile")
+def update_profile(payload: ProfileUpdate, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    if payload.full_name is not None:
+        user.full_name = payload.full_name.strip() or None
+    if payload.phone is not None:
+        user.phone = payload.phone.strip() or None
+    if payload.telegram_username is not None:
+        user.telegram_username = payload.telegram_username.strip().lstrip("@") or None
+    if payload.photo is not None:
+        if payload.photo and not payload.photo.startswith("data:image/"):
+            raise HTTPException(422, "Rasm formati noto'g'ri")
+        user.photo = payload.photo or None
+    if payload.new_password:
+        if not payload.current_password or not password_hash.verify(payload.current_password, user.password_hash):
+            raise HTTPException(403, "Joriy parol noto'g'ri")
+        user.password_hash = password_hash.hash(payload.new_password)
+    audit(db, user, "UPDATE", "USER", user.id, "Profil yangilandi")
+    db.commit(); db.refresh(user)
+    return ok(user_data(db, user))
+
+
 @app.get("/api/v1/bootstrap")
 def bootstrap(db: Session = Depends(get_db), _: User = Depends(current_user)) -> dict:
     bid = read_branch_id(db, _)
@@ -600,7 +621,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), _: User = De
     username = payload.username.strip().lower()
     if db.scalar(select(User).where(User.username == username)):
         raise HTTPException(409, "Bu login avval mavjud")
-    user = User(username=username, password_hash=password_hash.hash(payload.password), role=payload.role)
+    user = User(username=username, password_hash=password_hash.hash(payload.password), role=payload.role, full_name=(payload.full_name or "").strip() or None, phone=(payload.phone or "").strip() or None)
     db.add(user); db.flush(); audit(db, _, "CREATE", "USER", user.id, f"Xodim yaratildi: {user.username}"); db.commit(); db.refresh(user)
     return ok({**user_data(db, user), "active": user.active})
 

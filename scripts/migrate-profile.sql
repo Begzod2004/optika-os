@@ -1,0 +1,5 @@
+-- Xodim profili: ism, telefon, telegram, rasm
+ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(150);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(30);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_username VARCHAR(80);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS photo TEXT;

@@ -245,3 +245,15 @@
 .pay-method { display: flex; gap: 8px; margin: 0 16px 10px; }
 .pay-method button { flex: 1; border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 9px; font-weight: 700; font-size: 12px; cursor: pointer; }
 .pay-method button.active { background: var(--brand-soft); border-color: var(--brand); color: var(--brand); }
+
+/* Xodim profili */
+.avatar-img { width: 39px; height: 39px; border-radius: 50%; object-fit: cover; display: block; }
+.avatar-photo { object-fit: cover; }
+.profile-head { display: flex; gap: 14px; align-items: center; margin-bottom: 18px; }
+.profile-head > div { display: grid; gap: 3px; }
+.profile-head b { font-size: 15px; }
+.profile-head span { font-size: 11px; color: var(--muted); }
+.profile-photo { width: 64px; height: 64px; border-radius: 50%; object-fit: cover; }
+.profile-initials { display: grid; place-items: center; background: #dcefe6; color: var(--brand); font-weight: 800; font-size: 20px; }
+.logout-btn { width: 100%; margin-top: 14px; border: 1px solid #f3c6c0; background: #fff3f1; color: #a6372c; border-radius: 9px; padding: 12px; font-weight: 800; cursor: pointer; }
+.form input[type="file"] { padding: 9px 11px; height: auto; }

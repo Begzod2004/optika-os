@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -38,6 +38,10 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(30), default="SELLER")
     active: Mapped[bool] = mapped_column(default=True)
+    full_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    telegram_username: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    photo: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AuditLog(Base):
