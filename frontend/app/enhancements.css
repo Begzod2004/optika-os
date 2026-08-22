@@ -230,3 +230,8 @@
 @media (max-width: 760px) {
   .notice { left: 16px; right: 16px; top: calc(76px + env(safe-area-inset-top, 0px) + 9px); }
 }
+
+/* Retsept modalida saqlangan retseptlar tarixi */
+.rx-history { display: grid; gap: 5px; margin-bottom: 16px; border: 1px solid #cde5d9; background: #f2f9f5; border-radius: 9px; padding: 11px 13px; font-size: 11px; }
+.rx-history b { font-size: 11px; color: var(--brand); }
+.rx-history span { color: #5d6a63; }
