@@ -420,6 +420,14 @@ def cash_shift_data(shift: CashShift) -> dict:
     return {"id": shift.id, "branch_id": shift.branch_id, "opening_amount": shift.opening_amount, "expected_amount": shift.expected_amount, "actual_amount": shift.actual_amount, "difference": (shift.actual_amount - shift.expected_amount) if shift.actual_amount is not None and shift.expected_amount is not None else None, "status": shift.status, "opened_at": shift.opened_at, "closed_at": shift.closed_at}
 
 
+def cash_shift_full(db: Session, shift: CashShift) -> dict:
+    movements = list(db.scalars(select(CashMovement).where(CashMovement.cash_shift_id == shift.id).order_by(CashMovement.id.desc())))
+    data = cash_shift_data(shift)
+    data["expected"] = shift.opening_amount + sum(m.amount for m in movements)
+    data["movements"] = [{"id": m.id, "movement_type": m.movement_type, "amount": m.amount, "note": m.note, "created_at": m.created_at} for m in movements]
+    return data
+
+
 def open_shift(db: Session, branch_id: int | None) -> CashShift | None:
     # branch_id None (filialsiz OWNER) -> hech qaysi smena: pul boshqa filial kassasiga tushmasin.
     if branch_id is None:
@@ -540,7 +548,7 @@ def bootstrap(db: Session = Depends(get_db), _: User = Depends(current_user)) ->
     orders = list(db.scalars(orders_q))
     suppliers = list(db.scalars(select(Supplier).order_by(Supplier.name)))
     shift = open_shift(db, bid if bid is not None else user_branch_id(db, _))
-    return ok({"customers": [customer_data(c) for c in customers], "products": [product_data(p) for p in products], "orders": [order_data(o) for o in orders], "suppliers": [supplier_data(s) for s in suppliers], "cash_shift": cash_shift_data(shift) if shift else None})
+    return ok({"customers": [customer_data(c) for c in customers], "products": [product_data(p) for p in products], "orders": [order_data(o) for o in orders], "suppliers": [supplier_data(s) for s in suppliers], "cash_shift": cash_shift_full(db, shift) if shift else None})
 
 
 @app.get("/api/v1/search")
@@ -965,7 +973,10 @@ def create_order(payload: OrderCreate, db: Session = Depends(get_db), _: User = 
         product.stock -= 1
         customer.debt += product.sale_price - payload.paid
         order = Order(customer=customer, product=product, item_name=product.name, total=product.sale_price, paid=payload.paid, status="CONFIRMED", branch_id=customer.branch_id)
-        db.add(order); db.flush(); stock_movement(db, product, -1, "ORDER_RESERVE", "ORDER", order.id, "Buyurtma uchun rezerv"); audit(db, _, "CREATE", "ORDER", order.id, f"Buyurtma yaratildi: {product.name}"); db.commit(); db.refresh(order)
+        db.add(order); db.flush(); stock_movement(db, product, -1, "ORDER_RESERVE", "ORDER", order.id, "Buyurtma uchun rezerv")
+        if payload.paid and (shift := open_shift(db, customer.branch_id)):
+            db.add(CashMovement(cash_shift_id=shift.id, movement_type="ORDER_ADVANCE", amount=payload.paid, reference_type="ORDER", reference_id=order.id, note=f"Buyurtma #{order.id} avansi"))
+        audit(db, _, "CREATE", "ORDER", order.id, f"Buyurtma yaratildi: {product.name}"); db.commit(); db.refresh(order)
         db.refresh(order, attribute_names=["customer", "product"])
         notify_order_created(db, order, product.name)
         return ok(order_data(order))
@@ -977,7 +988,10 @@ def create_order(payload: OrderCreate, db: Session = Depends(get_db), _: User = 
         raise HTTPException(422, "Avans umumiy summadan katta bo'lishi mumkin emas")
     customer.debt += total - payload.paid
     order = Order(customer=customer, product=None, item_name=item_name, total=total, paid=payload.paid, status="CONFIRMED", branch_id=customer.branch_id)
-    db.add(order); db.flush(); audit(db, _, "CREATE", "ORDER", order.id, f"Qo'lda buyurtma yaratildi: {item_name}"); db.commit(); db.refresh(order)
+    db.add(order); db.flush()
+    if payload.paid and (shift := open_shift(db, customer.branch_id)):
+        db.add(CashMovement(cash_shift_id=shift.id, movement_type="ORDER_ADVANCE", amount=payload.paid, reference_type="ORDER", reference_id=order.id, note=f"Buyurtma #{order.id} avansi"))
+    audit(db, _, "CREATE", "ORDER", order.id, f"Qo'lda buyurtma yaratildi: {item_name}"); db.commit(); db.refresh(order)
     db.refresh(order, attribute_names=["customer"])
     notify_order_created(db, order, item_name)
     return ok(order_data(order))
@@ -1052,7 +1066,7 @@ def create_sale(payload: SaleCreate, db: Session = Depends(get_db), _: User = De
         stock_movement(db, product, -quantity, "SALE", "SALE", sale.id, "POS savdo")
     if customer:
         customer.debt += total - payload.paid
-    if shift := open_shift(db, sale_branch):
+    if payload.payment_method == "CASH" and (shift := open_shift(db, sale_branch)):
         db.add(CashMovement(cash_shift_id=shift.id, movement_type="SALE_PAYMENT", amount=payload.paid, reference_type="SALE", reference_id=sale.id, note=f"Sotuv #{sale.id}"))
     db.flush(); audit(db, _, "CREATE", "SALE", sale.id, f"Sotuv: {total} som, tolov: {payload.paid} som"); db.commit(); db.refresh(sale)
     return ok({"id": sale.id, "total": sale.total, "paid": sale.paid, "balance": sale.total - sale.paid, "created_at": sale.created_at})
@@ -1065,7 +1079,8 @@ def list_sales(limit: int = 100, db: Session = Depends(get_db), _: User = Depend
     if bid is not None:
         query = query.where(Sale.branch_id == bid)
     rows = db.scalars(query.limit(min(limit, 200))).unique()
-    return ok([{"id": sale.id, "customer": customer_data(sale.customer) if sale.customer else None, "total": sale.total, "paid": sale.paid, "balance": sale.total - sale.paid, "payment_method": sale.payment_method, "created_at": sale.created_at, "items": [{"product": product_data(item.product), "quantity": item.quantity, "unit_price": item.unit_price} for item in sale.items]} for sale in rows])
+    returned_map = {(r[0], r[1]): r[2] for r in db.execute(select(SaleReturn.sale_id, SaleReturn.product_id, func.sum(SaleReturn.quantity)).group_by(SaleReturn.sale_id, SaleReturn.product_id)).all()}
+    return ok([{"id": sale.id, "customer": customer_data(sale.customer) if sale.customer else None, "total": sale.total, "paid": sale.paid, "balance": sale.total - sale.paid, "payment_method": sale.payment_method, "created_at": sale.created_at, "items": [{"product": product_data(item.product), "quantity": item.quantity, "unit_price": item.unit_price, "returned": returned_map.get((sale.id, item.product_id), 0)} for item in sale.items]} for sale in rows])
 
 
 @app.post("/api/v1/sales/{sale_id}/return", status_code=status.HTTP_201_CREATED)
@@ -1082,6 +1097,11 @@ def return_sale_item(sale_id: int, payload: SaleReturnCreate, db: Session = Depe
         raise HTTPException(409, "Qaytarilayotgan miqdor sotilgan miqdordan katta")
     product = db.get(Product, payload.product_id)
     amount = sale_item.unit_price * payload.quantity
+    # Avval shu sotuvning to'lanmagan (qarz) qismi yopiladi, qolgani naqd qaytariladi.
+    prev_amount = db.scalar(select(func.coalesce(func.sum(SaleReturn.amount), 0)).where(SaleReturn.sale_id == sale.id)) or 0
+    outstanding = max(0, (sale.total - sale.paid) - prev_amount)
+    debt_reduction = min(amount, outstanding) if sale.customer else 0
+    cash_refund = amount - debt_reduction
     sale_return = SaleReturn(sale_id=sale.id, product_id=product.id, quantity=payload.quantity, amount=amount, disposition=payload.disposition, reason=payload.reason)
     db.add(sale_return); db.flush()
     if payload.disposition == "RESTOCK":
@@ -1089,13 +1109,13 @@ def return_sale_item(sale_id: int, payload: SaleReturnCreate, db: Session = Depe
         stock_movement(db, product, payload.quantity, "RETURN_IN", "SALE_RETURN", sale_return.id, payload.reason)
     else:
         stock_movement(db, product, 0, "DAMAGE", "SALE_RETURN", sale_return.id, payload.reason)
-    if sale.customer:
-        sale.customer.debt = max(0, sale.customer.debt - amount)
-    if shift := open_shift(db, sale.branch_id):
-        db.add(CashMovement(cash_shift_id=shift.id, movement_type="REFUND", amount=-amount, reference_type="SALE_RETURN", reference_id=sale_return.id, note=payload.reason))
+    if sale.customer and debt_reduction:
+        sale.customer.debt = max(0, sale.customer.debt - debt_reduction)
+    if cash_refund and (shift := open_shift(db, sale.branch_id)):
+        db.add(CashMovement(cash_shift_id=shift.id, movement_type="REFUND", amount=-cash_refund, reference_type="SALE_RETURN", reference_id=sale_return.id, note=payload.reason))
     audit(db, _, "RETURN", "SALE", sale.id, f"{payload.quantity} dona qaytarildi: {amount} som")
     db.commit(); db.refresh(sale_return)
-    return ok({"id": sale_return.id, "sale_id": sale_id, "product_id": product.id, "quantity": sale_return.quantity, "amount": sale_return.amount, "disposition": sale_return.disposition, "reason": sale_return.reason})
+    return ok({"id": sale_return.id, "sale_id": sale_id, "product_id": product.id, "quantity": sale_return.quantity, "amount": sale_return.amount, "cash_refund": cash_refund, "debt_reduction": debt_reduction, "disposition": sale_return.disposition, "reason": sale_return.reason})
 
 
 @app.get("/api/v1/suppliers")
@@ -1213,7 +1233,7 @@ def current_shift(db: Session = Depends(get_db), _: User = Depends(current_user)
     if bid == NO_BRANCH:
         return ok(None)
     shift = open_shift(db, bid if bid is not None else user_branch_id(db, _))
-    return ok(cash_shift_data(shift) if shift else None)
+    return ok(cash_shift_full(db, shift) if shift else None)
 
 
 @app.post("/api/v1/cash-shifts/open", status_code=status.HTTP_201_CREATED)

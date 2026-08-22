@@ -235,3 +235,13 @@
 .rx-history { display: grid; gap: 5px; margin-bottom: 16px; border: 1px solid #cde5d9; background: #f2f9f5; border-radius: 9px; padding: 11px 13px; font-size: 11px; }
 .rx-history b { font-size: 11px; color: var(--brand); }
 .rx-history span { color: #5d6a63; }
+
+/* Kassa: smena ogohlantirishi, harakatlar, to'lov turi */
+.shift-warning { margin-bottom: 14px; border: 1px solid #f0dcb8; background: #fff8ea; color: #8a6100; border-radius: 9px; padding: 10px 12px; font-size: 11px; font-weight: 700; }
+.cart .shift-warning { margin: 0 16px 10px; }
+.money-card b.neg { color: var(--danger); }
+.money-card { margin-bottom: 16px; }
+.empty-line { padding: 10px 0; color: var(--muted); font-size: 11px; }
+.pay-method { display: flex; gap: 8px; margin: 0 16px 10px; }
+.pay-method button { flex: 1; border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 9px; font-weight: 700; font-size: 12px; cursor: pointer; }
+.pay-method button.active { background: var(--brand-soft); border-color: var(--brand); color: var(--brand); }
