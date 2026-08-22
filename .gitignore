@@ -9,3 +9,4 @@ backend/*.db
 *.pyc
 graphify-out/
 frontend/tsconfig.tsbuildinfo
+uvicorn.log
